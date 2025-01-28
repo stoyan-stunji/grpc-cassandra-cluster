@@ -1625,6 +1625,14 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
         return data.getUncompacting();
     }
 
+    public Set<SSTableReader> getFullyExpiredSSTables()
+    {
+        try (CompactionController cc = new CompactionController(this, data.getCompacting(), gcBefore(FBUtilities.nowInSeconds())))
+        {
+            return cc.getFullyExpiredSSTables();
+        }
+    }
+
     public Map<UUID, PendingStat> getPendingRepairStats()
     {
         Map<UUID, PendingStat.Builder> builders = new HashMap<>();

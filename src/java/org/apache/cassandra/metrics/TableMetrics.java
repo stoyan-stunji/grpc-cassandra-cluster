@@ -26,6 +26,7 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Predicate;
 
+import com.google.common.base.Function;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
@@ -485,7 +486,10 @@ public class TableMetrics
                 long memtablePartitions = 0;
                 for (Memtable memtable : cfs.getTracker().getView().getAllMemtables())
                    memtablePartitions += memtable.partitionCount();
-                try(ColumnFamilyStore.RefViewFragment refViewFragment = cfs.selectAndReference(View.selectFunction(SSTableSet.CANONICAL)))
+
+                Set<SSTableReader> fullyExpiredSSTables = cfs.getFullyExpiredSSTables();
+                Function<View, Iterable<SSTableReader>> select = View.select(SSTableSet.CANONICAL, ssTableReader -> !fullyExpiredSSTables.contains(ssTableReader));
+                try(ColumnFamilyStore.RefViewFragment refViewFragment = cfs.selectAndReference(select))
                 {
                     return SSTableReader.getApproximateKeyCount(refViewFragment.sstables) + memtablePartitions;
                 }
