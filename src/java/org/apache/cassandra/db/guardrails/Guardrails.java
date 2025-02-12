@@ -20,6 +20,7 @@ package org.apache.cassandra.db.guardrails;
 
 import java.util.Collections;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -361,7 +362,7 @@ public final class Guardrails implements GuardrailsMBean
                                     what, value, isWarning ? "warning" : "failure", threshold));
 
     /**
-     * Guardrail on the size of a collection.
+     * Guardrail on the size of a simple type column.
      */
     public static final MaxThreshold columnValueSize =
     new MaxThreshold("column_value_size",
@@ -372,6 +373,45 @@ public final class Guardrails implements GuardrailsMBean
                      format("Value of column '%s' has size %s, this exceeds the %s threshold of %s.",
                             what, value, isWarning ? "warning" : "failure", threshold));
 
+
+    /**
+     * Guardrail on the size of an ascii type column.
+     */
+    public static final MaxThreshold columnAsciiValueSize =
+    new MaxThreshold("column_ascii_value_size",
+                     null,
+                     state -> sizeToBytes(CONFIG_PROVIDER.getOrCreate(state).getColumnAsciiValueSizeWarnThreshold()),
+                     state -> sizeToBytes(CONFIG_PROVIDER.getOrCreate(state).getColumnAsciiValueSizeFailThreshold()),
+                     (isWarning, what, value, threshold) ->
+                     format("Value of column '%s' has size %s, this exceeds the %s threshold of %s.",
+                            what, value, isWarning ? "warning" : "failure", threshold));
+
+    /**
+     * Guardrail on the size of a blob type column.
+     */
+    public static final MaxThreshold columnBlobValueSize =
+    new MaxThreshold("column_blob_value_size",
+                     null,
+                     state -> sizeToBytes(CONFIG_PROVIDER.getOrCreate(state).getColumnBlobValueSizeWarnThreshold()),
+                     state -> sizeToBytes(CONFIG_PROVIDER.getOrCreate(state).getColumnBlobValueSizeFailThreshold()),
+                     (isWarning, what, value, threshold) ->
+                     format("Value of column '%s' has size %s, this exceeds the %s threshold of %s.",
+                            what, value, isWarning ? "warning" : "failure", threshold));
+
+
+    /**
+     * Guardrail on the size of a text and varchar type column.
+     */
+    public static final MaxThreshold columnTextAndVarcharValueSize =
+    new MaxThreshold("column_text_value_size",
+                     null,
+                     state -> sizeToBytes(CONFIG_PROVIDER.getOrCreate(state).getColumnTextAndVarcharValueSizeWarnThreshold()),
+                     state -> sizeToBytes(CONFIG_PROVIDER.getOrCreate(state).getColumnTextAndVarcharValueSizeFailThreshold()),
+                     (isWarning, what, value, threshold) ->
+                     format("Value of column '%s' has size %s, this exceeds the %s threshold of %s.",
+                            what, value, isWarning ? "warning" : "failure", threshold));
+
+
     /**
      * Guardrail on the size of a collection.
      */
@@ -380,6 +420,60 @@ public final class Guardrails implements GuardrailsMBean
                      null,
                      state -> sizeToBytes(CONFIG_PROVIDER.getOrCreate(state).getCollectionSizeWarnThreshold()),
                      state -> sizeToBytes(CONFIG_PROVIDER.getOrCreate(state).getCollectionSizeFailThreshold()),
+                     (isWarning, what, value, threshold) ->
+                     format("Detected collection %s of size %s, this exceeds the %s threshold of %s.",
+                            what, value, isWarning ? "warning" : "failure", threshold));
+
+    /**
+     * Guardrail on the size of a map collection.
+     */
+    public static final MaxThreshold collectionMapSize =
+    new MaxThreshold("collection_map_size",
+                     null,
+                     state -> {
+                         Long mapSizeWarnThreshold = sizeToBytes(CONFIG_PROVIDER.getOrCreate(state).getCollectionMapSizeWarnThreshold());
+                         return Objects.requireNonNullElseGet(mapSizeWarnThreshold, () -> collectionSize.warnValue(state));
+                     },
+                     state -> {
+                         Long mapSizeFailThreshold = sizeToBytes(CONFIG_PROVIDER.getOrCreate(state).getCollectionMapSizeFailThreshold());
+                         return Objects.requireNonNullElseGet(mapSizeFailThreshold, () -> collectionSize.failValue(state));
+                     },
+                     (isWarning, what, value, threshold) ->
+                     format("Detected collection %s of size %s, this exceeds the %s threshold of %s.",
+                            what, value, isWarning ? "warning" : "failure", threshold));
+
+    /**
+     * Guardrail on the size of a set collection.
+     */
+    public static final MaxThreshold collectionSetSize =
+    new MaxThreshold("collection_set_size",
+                     null,
+                     state -> {
+                         Long setSizeWarnThreshold = sizeToBytes(CONFIG_PROVIDER.getOrCreate(state).getCollectionSetSizeWarnThreshold());
+                         return Objects.requireNonNullElseGet(setSizeWarnThreshold, () -> collectionSize.warnValue(state));
+                     },
+                     state -> {
+                         Long setSizeFailThreshold = sizeToBytes(CONFIG_PROVIDER.getOrCreate(state).getCollectionSetSizeFailThreshold());
+                         return Objects.requireNonNullElseGet(setSizeFailThreshold, () -> collectionSize.failValue(state));
+                     },
+                     (isWarning, what, value, threshold) ->
+                     format("Detected collection %s of size %s, this exceeds the %s threshold of %s.",
+                            what, value, isWarning ? "warning" : "failure", threshold));
+
+    /**
+     * Guardrail on the size of a list collection.
+     */
+    public static final MaxThreshold collectionListSize =
+    new MaxThreshold("collection_list_size",
+                     null,
+                     state -> {
+                         Long listSizeWarnThreshold = sizeToBytes(CONFIG_PROVIDER.getOrCreate(state).getCollectionListSizeWarnThreshold());
+                         return Objects.requireNonNullElseGet(listSizeWarnThreshold, () -> collectionSize.warnValue(state));
+                     },
+                     state -> {
+                         Long listSizeFailThreshold = sizeToBytes(CONFIG_PROVIDER.getOrCreate(state).getCollectionListSizeFailThreshold());
+                         return Objects.requireNonNullElseGet(listSizeFailThreshold, () -> collectionSize.failValue(state));
+                     },
                      (isWarning, what, value, threshold) ->
                      format("Detected collection %s of size %s, this exceeds the %s threshold of %s.",
                             what, value, isWarning ? "warning" : "failure", threshold));
@@ -993,6 +1087,66 @@ public final class Guardrails implements GuardrailsMBean
 
     @Override
     @Nullable
+    public String getColumnAsciiValueSizeWarnThreshold()
+    {
+        return sizeToString(DEFAULT_CONFIG.getColumnAsciiValueSizeWarnThreshold());
+    }
+
+    @Override
+    @Nullable
+    public String getColumnAsciiValueSizeFailThreshold()
+    {
+        return sizeToString(DEFAULT_CONFIG.getColumnAsciiValueSizeFailThreshold());
+    }
+
+    @Override
+    public void setColumnAsciiValueSizeThreshold(@Nullable String warnSize, @Nullable String failSize)
+    {
+        DEFAULT_CONFIG.setColumnAsciiValueSizeThreshold(sizeFromString(warnSize), sizeFromString(failSize));
+    }
+
+    @Override
+    @Nullable
+    public String getColumnBlobValueSizeWarnThreshold()
+    {
+        return sizeToString(DEFAULT_CONFIG.getColumnBlobValueSizeWarnThreshold());
+    }
+
+    @Override
+    @Nullable
+    public String getColumnBlobValueSizeFailThreshold()
+    {
+        return sizeToString(DEFAULT_CONFIG.getColumnBlobValueSizeFailThreshold());
+    }
+
+    @Override
+    public void setColumnBlobValueSizeThreshold(@Nullable String warnSize, @Nullable String failSize)
+    {
+        DEFAULT_CONFIG.setColumnBlobValueSizeThreshold(sizeFromString(warnSize), sizeFromString(failSize));
+    }
+
+    @Override
+    @Nullable
+    public String getColumnTextAndVarcharValueSizeWarnThreshold()
+    {
+        return sizeToString(DEFAULT_CONFIG.getColumnTextAndVarcharValueSizeWarnThreshold());
+    }
+
+    @Override
+    @Nullable
+    public String getColumnTextAndVarcharValueSizeFailThreshold()
+    {
+        return sizeToString(DEFAULT_CONFIG.getColumnTextAndVarcharValueSizeFailThreshold());
+    }
+
+    @Override
+    public void setColumnTextAndVarcharValueSizeThreshold(@Nullable String warnSize, @Nullable String failSize)
+    {
+        DEFAULT_CONFIG.setColumnTextAndVarcharValueSizeThreshold(sizeFromString(warnSize), sizeFromString(failSize));
+    }
+
+    @Override
+    @Nullable
     public String getCollectionSizeWarnThreshold()
     {
         return sizeToString(DEFAULT_CONFIG.getCollectionSizeWarnThreshold());
@@ -1009,6 +1163,66 @@ public final class Guardrails implements GuardrailsMBean
     public void setCollectionSizeThreshold(@Nullable String warnSize, @Nullable String failSize)
     {
         DEFAULT_CONFIG.setCollectionSizeThreshold(sizeFromString(warnSize), sizeFromString(failSize));
+    }
+
+    @Override
+    @Nullable
+    public String getCollectionMapSizeWarnThreshold()
+    {
+        return sizeToString(DEFAULT_CONFIG.getCollectionMapSizeWarnThreshold());
+    }
+
+    @Override
+    @Nullable
+    public String getCollectionMapSizeFailThreshold()
+    {
+        return sizeToString(DEFAULT_CONFIG.getCollectionMapSizeFailThreshold());
+    }
+
+    @Override
+    public void setCollectionMapSizeThreshold(@Nullable String warnSize, @Nullable String failSize)
+    {
+        DEFAULT_CONFIG.setCollectionMapSizeThreshold(sizeFromString(warnSize), sizeFromString(failSize));
+    }
+
+    @Override
+    @Nullable
+    public String getCollectionSetSizeWarnThreshold()
+    {
+        return sizeToString(DEFAULT_CONFIG.getCollectionSetSizeWarnThreshold());
+    }
+
+    @Override
+    @Nullable
+    public String getCollectionSetSizeFailThreshold()
+    {
+        return sizeToString(DEFAULT_CONFIG.getCollectionSetSizeFailThreshold());
+    }
+
+    @Override
+    public void setCollectionSetSizeThreshold(@Nullable String warnSize, @Nullable String failSize)
+    {
+        DEFAULT_CONFIG.setCollectionSetSizeThreshold(sizeFromString(warnSize), sizeFromString(failSize));
+    }
+
+    @Override
+    @Nullable
+    public String getCollectionListSizeWarnThreshold()
+    {
+        return sizeToString(DEFAULT_CONFIG.getCollectionListSizeWarnThreshold());
+    }
+
+    @Override
+    @Nullable
+    public String getCollectionListSizeFailThreshold()
+    {
+        return sizeToString(DEFAULT_CONFIG.getCollectionListSizeFailThreshold());
+    }
+
+    @Override
+    public void setCollectionListSizeThreshold(@Nullable String warnSize, @Nullable String failSize)
+    {
+        DEFAULT_CONFIG.setCollectionListSizeThreshold(sizeFromString(warnSize), sizeFromString(failSize));
     }
 
     @Override
