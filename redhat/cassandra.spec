@@ -100,7 +100,8 @@ rm -f bin/cassandra.in.sh
 rm -f lib/sigar-bin/*winnt*  # strip segfaults on dll..
 rm -f tools/bin/cassandra.in.sh
 
-# copy default configs
+# copy default configs directly to /etc/cassandra to align with Cassandra's expected config path
+# Removed references to 'default.conf' to simplify config management. Now, all Cassandra configs reside directly under /etc/cassandra
 cp -pr conf/* %{buildroot}/%{_sysconfdir}/%{username}/
 
 # step on default config with our redhat one
@@ -165,6 +166,7 @@ exit 0
 %{python_sitelib}/cassandra_pylib*.egg-info
 
 %post
+# Update alternatives to point to the correct config directory.
 alternatives --install /%{_sysconfdir}/%{username} %{username} /%{_sysconfdir}/%{username}/ 0
 exit 0
 
