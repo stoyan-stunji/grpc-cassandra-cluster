@@ -487,7 +487,7 @@ public class TableMetrics
                 for (Memtable memtable : cfs.getTracker().getView().getAllMemtables())
                    memtablePartitions += memtable.partitionCount();
 
-                try(ColumnFamilyStore.RefViewFragment refViewFragment = cfs.selectAndReference(View.select(SSTableSet.CANONICAL, cfs::getFullyExpiredSSTables)))
+                try(ColumnFamilyStore.RefViewFragment refViewFragment = cfs.selectAndReference(cfs.getTracker().getNotFullyExpired()))
                 {
                     return SSTableReader.getApproximateKeyCount(refViewFragment.sstables) + memtablePartitions;
                 }
