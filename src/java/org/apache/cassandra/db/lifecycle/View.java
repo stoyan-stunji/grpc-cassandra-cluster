@@ -18,6 +18,7 @@
 package org.apache.cassandra.db.lifecycle;
 
 import java.util.*;
+import java.util.function.Supplier;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Function;
@@ -212,6 +213,11 @@ public class View
     public static Function<View, Iterable<SSTableReader>> select(SSTableSet sstableSet, Predicate<SSTableReader> filter)
     {
         return (view) -> view.sstables(sstableSet, filter);
+    }
+
+    public static Function<View, Iterable<SSTableReader>> select(SSTableSet ssTableSet, Supplier<Set<SSTableReader>> filterOut)
+    {
+        return (view) -> filterOut(view.select(ssTableSet), filterOut.get());
     }
 
     /**
