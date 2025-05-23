@@ -55,6 +55,7 @@ import org.apache.cassandra.utils.Throwables;
 
 import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.base.Preconditions.checkState;
+import static org.apache.cassandra.config.Config.DiskAccessMode;
 import static org.apache.cassandra.io.util.FileHandle.Builder.NO_LENGTH_OVERRIDE;
 
 /**
@@ -88,6 +89,7 @@ public class BtiTableWriter extends SortedTableWriter<BtiFormatPartitionWriter, 
         FileHandle dataFile = null;
         PartitionIndex partitionIndex = null;
         FileHandle rowIndexFile = null;
+        Supplier<FileHandle> directDataFileSupplier = null;
 
         BtiTableReader.Builder builder = unbuildTo(new BtiTableReader.Builder(descriptor), true).setMaxDataAge(maxDataAge)
                                                                                                 .setSerializationHeader(header)
@@ -99,7 +101,9 @@ public class BtiTableWriter extends SortedTableWriter<BtiFormatPartitionWriter, 
 
             partitionIndex = partitionIndexSupplier.get();
             rowIndexFile = indexWriter.rowIndexFHBuilder.complete();
-            dataFile = openDataFile(isFinal ? NO_LENGTH_OVERRIDE : dataWriter.getLastFlushOffset(), builder.getStatsMetadata());
+            long dataLengthOverride = isFinal ? NO_LENGTH_OVERRIDE : dataWriter.getLastFlushOffset();
+            dataFile = openDataFile(dataLengthOverride, builder.getStatsMetadata(), ioOptions.defaultDiskAccessMode);
+            directDataFileSupplier = () -> openDataFile(dataLengthOverride, builder.getStatsMetadata(), DiskAccessMode.direct);
             filter = indexWriter.getFilterCopy();
 
             return builder.setPartitionIndex(partitionIndex)
@@ -107,6 +111,7 @@ public class BtiTableWriter extends SortedTableWriter<BtiFormatPartitionWriter, 
                           .setLast(partitionIndex.lastKey())
                           .setRowIndexFile(rowIndexFile)
                           .setDataFile(dataFile)
+                          .setDirectDataFileSupplier(directDataFileSupplier)
                           .setFilter(filter)
                           .build(owner().orElse(null), true, true);
         }

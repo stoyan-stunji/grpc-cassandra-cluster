@@ -22,8 +22,10 @@ import java.nio.ByteBuffer;
 import java.nio.MappedByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.channels.WritableByteChannel;
+import java.nio.file.OpenOption;
 import java.nio.file.StandardOpenOption;
 
+import com.sun.nio.file.ExtendedOpenOption;
 import org.apache.cassandra.io.FSReadError;
 import org.apache.cassandra.utils.NativeLibrary;
 import org.apache.cassandra.utils.concurrent.RefCounted;
@@ -40,15 +42,22 @@ import org.apache.cassandra.utils.concurrent.SharedCloseableImpl;
  */
 public final class ChannelProxy extends SharedCloseableImpl
 {
+
+    public enum IOMode
+    {
+        BUFFERED,
+        DIRECT
+    }
+
     private final File file;
     private final String filePath;
     private final FileChannel channel;
 
-    public static FileChannel openChannel(File file)
+    public static FileChannel openChannel(File file, OpenOption... openOptions)
     {
         try
         {
-            return FileChannel.open(file.toPath(), StandardOpenOption.READ);
+            return FileChannel.open(file.toPath(), openOptions);
         }
         catch (IOException e)
         {
@@ -56,14 +65,26 @@ public final class ChannelProxy extends SharedCloseableImpl
         }
     }
 
+    private static OpenOption[] openOptions(IOMode ioMode)
+    {
+        return IOMode.DIRECT == ioMode
+               ? new OpenOption[]{ StandardOpenOption.READ, ExtendedOpenOption.DIRECT }
+               : new OpenOption[]{ StandardOpenOption.READ };
+    }
+
     public ChannelProxy(String path)
     {
-        this (new File(path));
+        this(new File(path));
     }
 
     public ChannelProxy(File file)
     {
-        this(file, openChannel(file));
+        this(file, IOMode.BUFFERED);
+    }
+
+    public ChannelProxy(File file, IOMode ioMode)
+    {
+        this(file, openChannel(file, openOptions(ioMode)));
     }
 
     public ChannelProxy(File file, FileChannel channel)

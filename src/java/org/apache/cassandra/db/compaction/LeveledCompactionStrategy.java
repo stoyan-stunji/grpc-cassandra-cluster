@@ -327,7 +327,7 @@ public class LeveledCompactionStrategy extends AbstractCompactionStrategy
                 {
                     // L0 makes no guarantees about overlapping-ness.  Just create a direct scanner for each
                     for (SSTableReader sstable : byLevel.get(level))
-                        scanners.add(sstable.getScanner(ranges));
+                        scanners.add(sstable.getScanner(ranges, compactionScanDiskAccessMode()));
                 }
                 else
                 {
@@ -429,7 +429,7 @@ public class LeveledCompactionStrategy extends AbstractCompactionStrategy
             sstableIterator = this.sstables.iterator();
             assert sstableIterator.hasNext(); // caller should check intersecting first
             SSTableReader currentSSTable = sstableIterator.next();
-            currentScanner = currentSSTable.getScanner(ranges);
+            currentScanner = currentSSTable.getScanner(ranges, compactionScanDiskAccessMode());
 
         }
 
@@ -477,7 +477,7 @@ public class LeveledCompactionStrategy extends AbstractCompactionStrategy
                     return endOfData();
                 }
                 SSTableReader currentSSTable = sstableIterator.next();
-                currentScanner = currentSSTable.getScanner(ranges);
+                currentScanner = currentSSTable.getScanner(ranges, compactionScanDiskAccessMode());
             }
         }
 

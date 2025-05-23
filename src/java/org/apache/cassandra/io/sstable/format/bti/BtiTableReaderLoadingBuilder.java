@@ -70,9 +70,7 @@ public class BtiTableReaderLoadingBuilder extends SortedTableReaderLoadingBuilde
 
         try (PartitionIndex index = PartitionIndex.load(partitionIndexFileBuilder(), tableMetadataRef.getLocal().partitioner, false);
              CompressionMetadata compressionMetadata = CompressionInfoComponent.maybeLoad(descriptor, components);
-             FileHandle dFile = dataFileBuilder(statsMetadata).withCompressionMetadata(compressionMetadata)
-                                                              .withCrcCheckChance(() -> tableMetadataRef.getLocal().params.crcCheckChance)
-                                                              .complete();
+             FileHandle dFile = dataFileBuilder(statsMetadata, compressionMetadata).complete();
              FileHandle riFile = rowIndexFileBuilder().complete())
         {
             return PartitionIterator.create(index,
@@ -133,10 +131,8 @@ public class BtiTableReaderLoadingBuilder extends SortedTableReaderLoadingBuilde
 
             try (CompressionMetadata compressionMetadata = CompressionInfoComponent.maybeLoad(descriptor, components))
             {
-                builder.setDataFile(dataFileBuilder(builder.getStatsMetadata())
-                                    .withCompressionMetadata(compressionMetadata)
-                                    .withCrcCheckChance(() -> tableMetadataRef.getLocal().params.crcCheckChance)
-                                    .complete());
+                builder.setDataFile(dataFileBuilder(builder.getStatsMetadata(), compressionMetadata).complete());
+                builder.setDirectDataFileSupplier(() -> getDirectDataFile(builder.getStatsMetadata(), compressionMetadata));
             }
         }
         catch (IOException | RuntimeException | Error ex)
@@ -193,7 +189,7 @@ public class BtiTableReaderLoadingBuilder extends SortedTableReaderLoadingBuilde
             rowIndexFileBuilder = new FileHandle.Builder(descriptor.fileFor(Components.ROW_INDEX));
 
         rowIndexFileBuilder.withChunkCache(chunkCache);
-        rowIndexFileBuilder.mmapped(ioOptions.indexDiskAccessMode);
+        rowIndexFileBuilder.withDiskAccessMode(ioOptions.indexDiskAccessMode);
 
         return rowIndexFileBuilder;
     }
@@ -206,7 +202,7 @@ public class BtiTableReaderLoadingBuilder extends SortedTableReaderLoadingBuilde
             partitionIndexFileBuilder = new FileHandle.Builder(descriptor.fileFor(Components.PARTITION_INDEX));
 
         partitionIndexFileBuilder.withChunkCache(chunkCache);
-        partitionIndexFileBuilder.mmapped(ioOptions.indexDiskAccessMode);
+        partitionIndexFileBuilder.withDiskAccessMode(ioOptions.indexDiskAccessMode);
 
         return partitionIndexFileBuilder;
     }

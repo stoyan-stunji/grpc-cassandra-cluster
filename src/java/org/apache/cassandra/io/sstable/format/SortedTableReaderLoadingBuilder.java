@@ -21,19 +21,24 @@ package org.apache.cassandra.io.sstable.format;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.io.compress.CompressionMetadata;
 import org.apache.cassandra.io.sstable.SSTable;
 import org.apache.cassandra.io.sstable.format.bti.BtiFormat;
 import org.apache.cassandra.io.sstable.metadata.StatsMetadata;
 import org.apache.cassandra.io.sstable.metadata.ValidationMetadata;
+import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.io.util.FileHandle;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.IFilter;
+
+import static org.apache.cassandra.config.Config.DiskAccessMode;
 
 public abstract class SortedTableReaderLoadingBuilder<R extends SSTableReader, B extends SSTableReader.Builder<R, B>>
 extends SSTableReaderLoadingBuilder<R, B>
 {
     private final static Logger logger = LoggerFactory.getLogger(SortedTableReaderLoadingBuilder.class);
     private FileHandle.Builder dataFileBuilder;
+    private FileHandle.Builder directFileBuilder;
 
     public SortedTableReaderLoadingBuilder(SSTable.Builder<?, ?> builder)
     {
@@ -48,22 +53,42 @@ extends SSTableReaderLoadingBuilder<R, B>
                                                     validationMetadata);
     }
 
-    protected FileHandle.Builder dataFileBuilder(StatsMetadata statsMetadata)
+    protected FileHandle.Builder dataFileBuilder(StatsMetadata statsMetadata, CompressionMetadata compressionMetadata)
     {
         assert this.dataFileBuilder == null || this.dataFileBuilder.file.equals(descriptor.fileFor(BtiFormat.Components.DATA));
 
         logger.info("Opening {} ({})", descriptor, FBUtilities.prettyPrintMemory(descriptor.fileFor(BtiFormat.Components.DATA).length()));
 
-        long recordSize = statsMetadata.estimatedPartitionSize.percentile(ioOptions.diskOptimizationEstimatePercentile);
-        int bufferSize = ioOptions.diskOptimizationStrategy.bufferSize(recordSize);
-
         if (dataFileBuilder == null)
             dataFileBuilder = new FileHandle.Builder(descriptor.fileFor(BtiFormat.Components.DATA));
 
-        dataFileBuilder.bufferSize(bufferSize);
-        dataFileBuilder.withChunkCache(chunkCache);
-        dataFileBuilder.mmapped(ioOptions.defaultDiskAccessMode);
+        return dataFileBuilder(dataFileBuilder, statsMetadata, compressionMetadata);
+    }
 
-        return dataFileBuilder;
+    protected FileHandle getDirectDataFile(StatsMetadata statsMetadata, CompressionMetadata compressionMetadata)
+    {
+        File file = descriptor.fileFor(BtiFormat.Components.DATA);
+
+        logger.debug("Opening direct {} ({})", descriptor, FBUtilities.prettyPrintMemory(file.length()));
+
+        if (directFileBuilder == null)
+            directFileBuilder = new FileHandle.Builder(file)
+                                .withDiskAccessMode(DiskAccessMode.direct);
+
+        return dataFileBuilder(directFileBuilder, statsMetadata, compressionMetadata).complete();
+    }
+
+    private FileHandle.Builder dataFileBuilder(FileHandle.Builder builder, StatsMetadata statsMetadata,
+                                               CompressionMetadata compressionMetadata)
+    {
+        long recordSize = statsMetadata.estimatedPartitionSize.percentile(ioOptions.diskOptimizationEstimatePercentile);
+        int bufferSize = ioOptions.diskOptimizationStrategy.bufferSize(recordSize);
+
+        builder.bufferSize(bufferSize);
+        builder.withChunkCache(chunkCache);
+        builder.withDiskAccessMode(ioOptions.defaultDiskAccessMode);
+        builder.withCompressionMetadata(compressionMetadata);
+        builder.withCrcCheckChance(() -> tableMetadataRef.getLocal().params.crcCheckChance);
+        return builder;
     }
 }

@@ -139,10 +139,8 @@ public class BigSSTableReaderLoadingBuilder extends SortedTableReaderLoadingBuil
 
             try (CompressionMetadata compressionMetadata = CompressionInfoComponent.maybeLoad(descriptor, components))
             {
-                builder.setDataFile(dataFileBuilder(builder.getStatsMetadata())
-                                    .withCompressionMetadata(compressionMetadata)
-                                    .withCrcCheckChance(() -> tableMetadataRef.getLocal().params.crcCheckChance)
-                                    .complete());
+                builder.setDataFile(dataFileBuilder(builder.getStatsMetadata(), compressionMetadata).complete());
+                builder.setDirectDataFileSupplier(() -> getDirectDataFile(builder.getStatsMetadata(), compressionMetadata));
             }
 
             if (builder.getFilter() == null)

@@ -28,6 +28,8 @@ import java.util.Set;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableMap;
+import org.apache.cassandra.config.Config.ScanDiskAccessMode;
+import org.apache.cassandra.config.DatabaseDescriptor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -261,7 +263,7 @@ public abstract class AbstractCompactionStrategy
         try
         {
             for (SSTableReader sstable : sstables)
-                scanners.add(sstable.getScanner(ranges));
+                scanners.add(sstable.getScanner(ranges, compactionScanDiskAccessMode()));
         }
         catch (Throwable t)
         {
@@ -581,4 +583,10 @@ public abstract class AbstractCompactionStrategy
     {
         return true;
     }
+
+    protected static ScanDiskAccessMode compactionScanDiskAccessMode()
+    {
+        return DatabaseDescriptor.getCompactionScanDiskAccessMode();
+    }
+
 }

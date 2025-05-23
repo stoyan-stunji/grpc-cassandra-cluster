@@ -27,6 +27,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import com.google.common.collect.ImmutableSet;
 
+import org.apache.cassandra.config.Config.ScanDiskAccessMode;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.rows.UnfilteredRowIterator;
 import org.apache.cassandra.io.sstable.CorruptSSTableException;
@@ -69,11 +70,12 @@ implements ISSTableScanner
     /// The ranges can be constructed by [SSTableReader#getPositionsForRanges] and similar methods as done by the
     /// various [SSTableReader#getScanner] variations.
     public SSTableSimpleScanner(SSTableReader sstable,
-                                Collection<PartitionPositionBounds> boundsList)
+                                Collection<PartitionPositionBounds> boundsList,
+                                ScanDiskAccessMode diskAccessMode)
     {
         assert sstable != null;
 
-        this.dfile = sstable.openDataReaderForScan();
+        this.dfile = sstable.openDataReaderForScan(diskAccessMode);
         this.sstable = sstable;
         this.sizeInBytes = boundsList.stream().mapToLong(ppb -> ppb.upperPosition - ppb.lowerPosition).sum();
         this.compressedSizeInBytes = sstable.compression ? sstable.onDiskSizeForPartitionPositions(boundsList) : sizeInBytes;
