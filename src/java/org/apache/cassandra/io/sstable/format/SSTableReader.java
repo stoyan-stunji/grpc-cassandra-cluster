@@ -638,6 +638,7 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
         if (builder.getDataFile() == null)
             b.setDataFile(sharedCopy ? sharedCopyOrNull(dfile) : dfile);
 
+        b.setDirectDataFileSupplier(directDataFileSupplier);
         b.setStatsMetadata(sstableMetadata);
         b.setSerializationHeader(header);
         b.setMaxDataAge(maxDataAge);

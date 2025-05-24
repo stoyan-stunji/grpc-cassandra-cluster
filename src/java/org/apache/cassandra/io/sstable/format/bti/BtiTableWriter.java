@@ -89,7 +89,6 @@ public class BtiTableWriter extends SortedTableWriter<BtiFormatPartitionWriter, 
         FileHandle dataFile = null;
         PartitionIndex partitionIndex = null;
         FileHandle rowIndexFile = null;
-        Supplier<FileHandle> directDataFileSupplier = null;
 
         BtiTableReader.Builder builder = unbuildTo(new BtiTableReader.Builder(descriptor), true).setMaxDataAge(maxDataAge)
                                                                                                 .setSerializationHeader(header)
@@ -103,7 +102,6 @@ public class BtiTableWriter extends SortedTableWriter<BtiFormatPartitionWriter, 
             rowIndexFile = indexWriter.rowIndexFHBuilder.complete();
             long dataLengthOverride = isFinal ? NO_LENGTH_OVERRIDE : dataWriter.getLastFlushOffset();
             dataFile = openDataFile(dataLengthOverride, builder.getStatsMetadata(), ioOptions.defaultDiskAccessMode);
-            directDataFileSupplier = () -> openDataFile(dataLengthOverride, builder.getStatsMetadata(), DiskAccessMode.direct);
             filter = indexWriter.getFilterCopy();
 
             return builder.setPartitionIndex(partitionIndex)
@@ -111,7 +109,7 @@ public class BtiTableWriter extends SortedTableWriter<BtiFormatPartitionWriter, 
                           .setLast(partitionIndex.lastKey())
                           .setRowIndexFile(rowIndexFile)
                           .setDataFile(dataFile)
-                          .setDirectDataFileSupplier(directDataFileSupplier)
+                          .setDirectDataFileSupplier(() -> openDataFile(dataLengthOverride, builder.getStatsMetadata(), DiskAccessMode.direct))
                           .setFilter(filter)
                           .build(owner().orElse(null), true, true);
         }
