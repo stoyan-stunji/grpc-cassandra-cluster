@@ -67,9 +67,15 @@ public final class ChannelProxy extends SharedCloseableImpl
 
     private static OpenOption[] openOptions(IOMode ioMode)
     {
-        return IOMode.DIRECT == ioMode
-               ? new OpenOption[]{ StandardOpenOption.READ, ExtendedOpenOption.DIRECT }
-               : new OpenOption[]{ StandardOpenOption.READ };
+        switch (ioMode)
+        {
+            case DIRECT:
+                return new OpenOption[]{ StandardOpenOption.READ, ExtendedOpenOption.DIRECT };
+            case BUFFERED:
+                return new OpenOption[]{ StandardOpenOption.READ };
+            default:
+                throw new IllegalArgumentException("Unknown IOMode " + ioMode);
+        }
     }
 
     public ChannelProxy(String path)

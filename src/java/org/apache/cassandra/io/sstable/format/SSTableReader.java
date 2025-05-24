@@ -116,6 +116,7 @@ import org.apache.cassandra.utils.concurrent.SharedCloseable;
 import org.apache.cassandra.utils.concurrent.UncheckedInterruptedException;
 
 import static org.apache.cassandra.concurrent.ExecutorFactory.Global.executorFactory;
+import static org.apache.cassandra.io.util.FileHandle.OnReaderClose;
 import static org.apache.cassandra.utils.TimeUUID.unixMicrosToRawTimestamp;
 import static org.apache.cassandra.utils.concurrent.BlockingQueues.newBlockingQueue;
 import static org.apache.cassandra.utils.concurrent.SharedCloseable.sharedCopyOrNull;
@@ -368,7 +369,7 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
 
     public static SSTableReader open(SSTable.Owner owner, Descriptor desc, TableMetadataRef metadata)
     {
-        return open(owner, desc,  null, metadata);
+        return open(owner, desc, null, metadata);
     }
 
     public static SSTableReader open(SSTable.Owner owner, Descriptor descriptor, Set<Component> components, TableMetadataRef metadata)
@@ -479,6 +480,7 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
         this.directDataFileSupplier = builder.getDirectDataFileSupplier();
         this.directIOSupported = directDataFileSupplier != null
                                  && FileUtils.isDirectIOSupported(dfile.file())
+                                 // DIO currently only supported for compressed reads
                                  && dfile.compressionMetadata().isPresent();
         this.maxDataAge = builder.getMaxDataAge();
         this.openReason = builder.getOpenReason();
@@ -1424,14 +1426,24 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
         return openDataReaderForScan(ScanDiskAccessMode.disk_default);
     }
 
-    public RandomAccessReader openDataReaderForScan(ScanDiskAccessMode scanMode)
+    public RandomAccessReader openDataReaderForScan(ScanDiskAccessMode scanDiskAccessMode)
     {
-        if (scanMode == ScanDiskAccessMode.direct && directIOSupported)
+        switch (scanDiskAccessMode)
         {
-            return directDataFileSupplier.get().createReaderForScan(FileHandle.OnReaderClose.CLOSE_FILE);
+            case direct:
+                if (directIOSupported)
+                {
+                    return directDataFileSupplier.get().createReaderForScan(OnReaderClose.CLOSE_FILE);
+                }
+                else
+                {
+                    return dfile.createReaderForScan(OnReaderClose.RETAIN_FILE_OPEN);
+                }
+            case disk_default:
+                return dfile.createReaderForScan(OnReaderClose.RETAIN_FILE_OPEN);
+            default:
+                throw new IllegalArgumentException("Unknown scan mode " + scanDiskAccessMode);
         }
-
-        return dfile.createReaderForScan(FileHandle.OnReaderClose.RETAIN_FILE_OPEN);
     }
 
     public void trySkipFileCacheBefore(DecoratedKey key)
