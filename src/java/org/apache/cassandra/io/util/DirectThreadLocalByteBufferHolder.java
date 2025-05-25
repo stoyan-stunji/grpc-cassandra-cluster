@@ -27,12 +27,12 @@ import org.agrona.BufferUtil;
 public final class DirectThreadLocalByteBufferHolder implements ByteBufferHolder
 {
 
-    static final FastThreadLocal<ByteBuffer> LOCAL = new FastThreadLocal<>()
+    final FastThreadLocal<ByteBuffer> local = new FastThreadLocal<>()
     {
         @Override
         protected ByteBuffer initialValue()
         {
-            return ByteBuffer.allocate(0);
+            return ByteBuffer.allocateDirect(0);
         }
     };
 
@@ -48,7 +48,7 @@ public final class DirectThreadLocalByteBufferHolder implements ByteBufferHolder
     {
         int alignedSize = BitUtil.align(size, blockSize);
 
-        ByteBuffer buffer = LOCAL.get();
+        ByteBuffer buffer = local.get();
         if (buffer.capacity() >= alignedSize)
         {
             buffer.clear().limit(alignedSize);
@@ -56,9 +56,8 @@ public final class DirectThreadLocalByteBufferHolder implements ByteBufferHolder
         }
 
         FileUtils.clean(buffer);
-
         buffer = BufferUtil.allocateDirectAligned(alignedSize, blockSize);
-        LOCAL.set(buffer);
+        local.set(buffer);
         return buffer;
     }
 }

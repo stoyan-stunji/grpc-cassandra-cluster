@@ -38,7 +38,7 @@ public class DirectThreadLocalByteBufferHolderTest
 
         Assert.assertEquals(alignedBufferSize, byteBuffer.limit());
         Assert.assertEquals(0, byteBuffer.position());
-        Assert.assertEquals(byteBuffer, DirectThreadLocalByteBufferHolder.LOCAL.get());
+        Assert.assertEquals(byteBuffer, holder.local.get());
         byteBuffer.put(new byte[alignedBufferSize]);
 
         // Re-use buffer of same size
@@ -55,7 +55,7 @@ public class DirectThreadLocalByteBufferHolderTest
         byteBuffer = holder.getBuffer(nonAlignedBufferSize);
         Assert.assertEquals(alignedBufferSize, byteBuffer.limit());
         Assert.assertEquals(0, byteBuffer.position());
-        Assert.assertNotEquals(oldBuffer, DirectThreadLocalByteBufferHolder.LOCAL.get());
-        Assert.assertEquals(byteBuffer, DirectThreadLocalByteBufferHolder.LOCAL.get());
+        Assert.assertNotEquals(oldBuffer, holder.local.get());
+        Assert.assertEquals(byteBuffer, holder.local.get());
     }
 }
