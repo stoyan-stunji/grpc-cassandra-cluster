@@ -38,7 +38,6 @@ extends SSTableReaderLoadingBuilder<R, B>
 {
     private final static Logger logger = LoggerFactory.getLogger(SortedTableReaderLoadingBuilder.class);
     private FileHandle.Builder dataFileBuilder;
-    private FileHandle.Builder directFileBuilder;
 
     public SortedTableReaderLoadingBuilder(SSTable.Builder<?, ?> builder)
     {
@@ -65,17 +64,17 @@ extends SSTableReaderLoadingBuilder<R, B>
         return dataFileBuilder(dataFileBuilder, statsMetadata, compressionMetadata);
     }
 
-    protected FileHandle getDirectDataFile(StatsMetadata statsMetadata, CompressionMetadata compressionMetadata)
+    protected FileHandle getDataFile(StatsMetadata statsMetadata, CompressionMetadata compressionMetadata,
+                                     DiskAccessMode diskAccessMode)
     {
         File file = descriptor.fileFor(BtiFormat.Components.DATA);
 
-        logger.debug("Opening direct {} ({})", descriptor, FBUtilities.prettyPrintMemory(file.length()));
+        logger.debug("Opening {} ({})", descriptor, FBUtilities.prettyPrintMemory(file.length()));
 
-        if (directFileBuilder == null)
-            directFileBuilder = new FileHandle.Builder(file)
-                                .withDiskAccessMode(DiskAccessMode.direct);
+        FileHandle.Builder fileBuilder = new FileHandle.Builder(file)
+                                         .withDiskAccessMode(diskAccessMode);
 
-        return dataFileBuilder(directFileBuilder, statsMetadata, compressionMetadata).complete();
+        return dataFileBuilder(fileBuilder, statsMetadata, compressionMetadata).complete();
     }
 
     private FileHandle.Builder dataFileBuilder(FileHandle.Builder builder, StatsMetadata statsMetadata,

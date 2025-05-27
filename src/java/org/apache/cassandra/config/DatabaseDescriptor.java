@@ -648,6 +648,9 @@ public class DatabaseDescriptor
         }
         logger.info("DiskAccessMode is {}, indexAccessMode is {}", conf.disk_access_mode, indexAccessMode);
 
+        initializeCompactionScanDiskAccessMode();
+        logger.info("compaction_scan_disk_access_mode resolved to: {}", compactionScanDiskAccessMode);
+
         /* phi convict threshold for FailureDetector */
         if (conf.phi_convict_threshold < 5 || conf.phi_convict_threshold > 16)
         {
@@ -901,9 +904,6 @@ public class DatabaseDescriptor
         applyConcurrentValidations(conf);
         applyRepairCommandPoolSize(conf);
         applyReadThresholdsValidations(conf);
-
-        initializeCompactionScanDiskAccessMode();
-        logger.info("compaction_scan_disk_access_mode resolved to: {}", compactionScanDiskAccessMode);
 
         if (conf.concurrent_materialized_view_builders <= 0)
             throw new ConfigurationException("concurrent_materialized_view_builders should be strictly greater than 0, but was " + conf.concurrent_materialized_view_builders, false);
@@ -1699,9 +1699,14 @@ public class DatabaseDescriptor
         partitionerName = partitioner.getClass().getCanonicalName();
     }
 
-    private static DiskAccessMode resolveCompactionScanDiskAccessMode(DiskAccessMode diskAccessMode)
+    private static DiskAccessMode resolveCompactionScanDiskAccessMode(DiskAccessMode defaultDiskAccessMode,
+                                                                      DiskAccessMode compactionScanDiskAccessMode)
     {
-        if (diskAccessMode == DiskAccessMode.direct)
+        if (DiskAccessMode.auto == compactionScanDiskAccessMode)
+        {
+            return defaultDiskAccessMode;
+        }
+        else if (DiskAccessMode.direct == compactionScanDiskAccessMode)
         {
             if (conf.disk_optimization_strategy == Config.DiskOptimizationStrategy.ssd)
             {
@@ -1710,9 +1715,13 @@ public class DatabaseDescriptor
 
             logger.warn("Compaction scan disk access mode {} not supported on disk optimization strategy {}",
                         DiskAccessMode.direct, conf.disk_optimization_strategy);
+            return defaultDiskAccessMode;
         }
-
-        return DiskAccessMode.auto;
+        else
+        {
+            throw new IllegalArgumentException("Unsupported disk access mode for compaction_scan_disk_access_mode " +
+                                               "(options: direct/auto) " + compactionScanDiskAccessMode);
+        }
     }
 
     private static Pair<DiskAccessMode, Boolean> resolveCommitLogWriteDiskAccessMode(DiskAccessMode providedDiskAccessMode)
@@ -3276,7 +3285,7 @@ public class DatabaseDescriptor
 
     public static void initializeCompactionScanDiskAccessMode()
     {
-        compactionScanDiskAccessMode = resolveCompactionScanDiskAccessMode(conf.compaction_scan_disk_access_mode);
+        compactionScanDiskAccessMode = resolveCompactionScanDiskAccessMode(conf.disk_access_mode, conf.compaction_scan_disk_access_mode);
     }
 
     public static String getSavedCachesLocation()

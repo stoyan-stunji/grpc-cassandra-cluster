@@ -55,7 +55,6 @@ import org.apache.cassandra.utils.Throwables;
 
 import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.base.Preconditions.checkState;
-import static org.apache.cassandra.config.Config.DiskAccessMode;
 import static org.apache.cassandra.io.util.FileHandle.Builder.NO_LENGTH_OVERRIDE;
 
 /**
@@ -109,7 +108,7 @@ public class BtiTableWriter extends SortedTableWriter<BtiFormatPartitionWriter, 
                           .setLast(partitionIndex.lastKey())
                           .setRowIndexFile(rowIndexFile)
                           .setDataFile(dataFile)
-                          .setDirectDataFileSupplier(() -> openDataFile(dataLengthOverride, builder.getStatsMetadata(), DiskAccessMode.direct))
+                          .setDataFileFactory(diskAccessMode -> openDataFile(dataLengthOverride, builder.getStatsMetadata(), diskAccessMode))
                           .setFilter(filter)
                           .build(owner().orElse(null), true, true);
         }

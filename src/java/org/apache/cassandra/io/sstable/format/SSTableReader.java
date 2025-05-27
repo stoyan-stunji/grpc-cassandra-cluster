@@ -37,7 +37,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
-import java.util.function.Supplier;
+import java.util.function.Function;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
@@ -272,7 +272,7 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
     public final OpenReason openReason;
 
     protected final FileHandle dfile;
-    protected final Supplier<FileHandle> directDataFileSupplier;
+    protected final Function<DiskAccessMode, FileHandle> dataFileFactory;
     protected final boolean directIOSupported;
 
     // technically isCompacted is not necessary since it should never be unreferenced unless it is also compacted,
@@ -477,9 +477,8 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
         this.sstableMetadata = builder.getStatsMetadata();
         this.header = builder.getSerializationHeader();
         this.dfile = builder.getDataFile();
-        this.directDataFileSupplier = builder.getDirectDataFileSupplier();
-        this.directIOSupported = directDataFileSupplier != null
-                                 && FileUtils.isDirectIOSupported(dfile.file())
+        this.dataFileFactory = builder.getDataFileFactory();
+        this.directIOSupported = FileUtils.isDirectIOSupported(dfile.file())
                                  // DIO currently only supported for compressed reads
                                  && dfile.compressionMetadata().isPresent();
         this.maxDataAge = builder.getMaxDataAge();
@@ -489,7 +488,7 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
         this.interval = first == null || last == null ? null : Interval.create(first, last, this);
         this.bounds = first == null || last == null || AbstractBounds.strictlyWrapsAround(first.getToken(), last.getToken())
                       ? null // this will cause the validation to fail, but the reader is opened with no validation,
-                      // e.g. for scrubbing, we should accept screwed bounds
+                             // e.g. for scrubbing, we should accept screwed bounds
                       : AbstractBounds.bounds(first.getToken(), true, last.getToken(), true);
 
         tidy = new InstanceTidier(descriptor, owner);
@@ -640,7 +639,7 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
         if (builder.getDataFile() == null)
             b.setDataFile(sharedCopy ? sharedCopyOrNull(dfile) : dfile);
 
-        b.setDirectDataFileSupplier(directDataFileSupplier);
+        b.setDataFileFactory(dataFileFactory);
         b.setStatsMetadata(sstableMetadata);
         b.setSerializationHeader(header);
         b.setMaxDataAge(maxDataAge);
@@ -1076,7 +1075,7 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
      */
     public ISSTableScanner getScanner()
     {
-        return getScanner(DiskAccessMode.auto);
+        return getScanner(dfile.diskAccessMode());
     }
 
     public ISSTableScanner getScanner(DiskAccessMode diskAccessMode)
@@ -1096,15 +1095,15 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
      */
     public ISSTableScanner getScanner(Collection<Range<Token>> ranges)
     {
-        return getScanner(ranges, DiskAccessMode.auto);
+        return getScanner(ranges, dfile.diskAccessMode());
     }
 
-    public ISSTableScanner getScanner(Collection<Range<Token>> ranges, DiskAccessMode scanMode)
+    public ISSTableScanner getScanner(Collection<Range<Token>> ranges, DiskAccessMode diskAccessMode)
     {
         if (ranges != null)
-            return new SSTableSimpleScanner(this, getPositionsForRanges(ranges), scanMode);
+            return new SSTableSimpleScanner(this, getPositionsForRanges(ranges), diskAccessMode);
         else
-            return getScanner(scanMode);
+            return getScanner(diskAccessMode);
     }
 
     /**
@@ -1115,7 +1114,7 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
      */
     public ISSTableScanner getScanner(Iterator<AbstractBounds<PartitionPosition>> boundsIterator)
     {
-        return new SSTableSimpleScanner(this, getPositionsForBoundsIterator(boundsIterator), DiskAccessMode.auto);
+        return new SSTableSimpleScanner(this, getPositionsForBoundsIterator(boundsIterator), dfile.diskAccessMode());
     }
 
 
@@ -1423,12 +1422,12 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
 
     public RandomAccessReader openDataReaderForScan()
     {
-        return openDataReaderForScan(DiskAccessMode.auto);
+        return openDataReaderForScan(dfile.diskAccessMode());
     }
 
     public RandomAccessReader openDataReaderForScan(DiskAccessMode diskAccessMode)
     {
-        if (diskAccessMode == null || diskAccessMode == DiskAccessMode.auto)
+        if (diskAccessMode == dfile.diskAccessMode() || dataFileFactory == null)
         {
             return dfile.createReaderForScan(OnReaderClose.RETAIN_FILE_OPEN);
         }
@@ -1436,7 +1435,7 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
         {
             if (directIOSupported)
             {
-                return directDataFileSupplier.get().createReaderForScan(OnReaderClose.CLOSE_FILE);
+                return dataFileFactory.apply(DiskAccessMode.direct).createReaderForScan(OnReaderClose.CLOSE_FILE);
             }
             else
             {
@@ -1445,7 +1444,7 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
         }
         else
         {
-            throw new IllegalArgumentException("Unsupported scan disk access mode " + diskAccessMode);
+            throw new IllegalArgumentException("Unsupported disk access mode " + diskAccessMode);
         }
     }
 
@@ -1995,7 +1994,7 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
         private StatsMetadata statsMetadata;
         private OpenReason openReason;
         private SerializationHeader serializationHeader;
-        private Supplier<FileHandle> directDataFileSupplier;
+        private Function<DiskAccessMode, FileHandle> dataFileFactory;
         private FileHandle dataFile;
         private DecoratedKey first;
         private DecoratedKey last;
@@ -2033,9 +2032,9 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
             return (B) this;
         }
 
-        public B setDirectDataFileSupplier(Supplier<FileHandle> directDataFileSupplier)
+        public B setDataFileFactory(Function<DiskAccessMode, FileHandle> dataFileFactory)
         {
-            this.directDataFileSupplier = directDataFileSupplier;
+            this.dataFileFactory = dataFileFactory;
             return (B) this;
         }
 
@@ -2083,9 +2082,9 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
             return serializationHeader;
         }
 
-        public Supplier<FileHandle> getDirectDataFileSupplier()
+        public Function<DiskAccessMode, FileHandle> getDataFileFactory()
         {
-            return directDataFileSupplier;
+            return dataFileFactory;
         }
 
         public FileHandle getDataFile()

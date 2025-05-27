@@ -63,7 +63,6 @@ import org.apache.cassandra.utils.Throwables;
 
 import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.base.Preconditions.checkState;
-import static org.apache.cassandra.config.Config.DiskAccessMode;
 import static org.apache.cassandra.io.util.FileHandle.Builder.NO_LENGTH_OVERRIDE;
 import static org.apache.cassandra.utils.Clock.Global.currentTimeMillis;
 
@@ -175,7 +174,7 @@ public class BigTableWriter extends SortedTableWriter<BigFormatPartitionWriter, 
             long dataLengthOverride = boundary != null ? boundary.dataLength : NO_LENGTH_OVERRIDE;
             dataFile = openDataFile(dataLengthOverride, builder.getStatsMetadata(), ioOptions.defaultDiskAccessMode);
             builder.setDataFile(dataFile);
-            builder.setDirectDataFileSupplier(() -> openDataFile(dataLengthOverride, builder.getStatsMetadata(), DiskAccessMode.direct));
+            builder.setDataFileFactory(diskAccessMode -> openDataFile(dataLengthOverride, builder.getStatsMetadata(), diskAccessMode));
             builder.setKeyCache(metadata().params.caching.cacheKeys() ? new KeyCache(CacheService.instance.keyCache) : KeyCache.NO_CACHE);
 
             reader = builder.build(owner().orElse(null), true, true);

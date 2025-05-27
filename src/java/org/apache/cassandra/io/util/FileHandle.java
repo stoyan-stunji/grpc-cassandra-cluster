@@ -70,17 +70,21 @@ public class FileHandle extends SharedCloseableImpl
      */
     private final Optional<CompressionMetadata> compressionMetadata;
 
+    private final DiskAccessMode diskAccessMode;
+
     private FileHandle(Cleanup cleanup,
                        ChannelProxy channel,
                        RebuffererFactory rebuffererFactory,
                        CompressionMetadata compressionMetadata,
-                       long onDiskLength)
+                       long onDiskLength,
+                       DiskAccessMode diskAccessMode)
     {
         super(cleanup);
         this.rebuffererFactory = rebuffererFactory;
         this.channel = channel;
         this.compressionMetadata = Optional.ofNullable(compressionMetadata);
         this.onDiskLength = onDiskLength;
+        this.diskAccessMode = diskAccessMode;
     }
 
     private FileHandle(FileHandle copy)
@@ -90,6 +94,7 @@ public class FileHandle extends SharedCloseableImpl
         rebuffererFactory = copy.rebuffererFactory;
         compressionMetadata = copy.compressionMetadata;
         onDiskLength = copy.onDiskLength;
+        diskAccessMode = copy.diskAccessMode;
     }
 
     /**
@@ -118,6 +123,11 @@ public class FileHandle extends SharedCloseableImpl
     public Optional<CompressionMetadata> compressionMetadata()
     {
         return compressionMetadata;
+    }
+
+    public DiskAccessMode diskAccessMode()
+    {
+        return diskAccessMode;
     }
 
     @Override
@@ -293,7 +303,7 @@ public class FileHandle extends SharedCloseableImpl
         private ChunkCache chunkCache;
         private int bufferSize = RandomAccessReader.DEFAULT_BUFFER_SIZE;
         private BufferType bufferType = BufferType.OFF_HEAP;
-        private DiskAccessMode diskAccessMode;
+        private DiskAccessMode diskAccessMode = DiskAccessMode.standard;
         private long lengthOverride = -1;
         private MmappedRegionsCache mmappedRegionsCache;
 
@@ -468,7 +478,7 @@ public class FileHandle extends SharedCloseableImpl
                 }
 
                 Cleanup cleanup = new Cleanup(channel, rebuffererFactory, compressionMetadata, chunkCache);
-                return new FileHandle(cleanup, channel, rebuffererFactory, compressionMetadata, length);
+                return new FileHandle(cleanup, channel, rebuffererFactory, compressionMetadata, length, diskAccessMode);
             }
             catch (Throwable t)
             {
