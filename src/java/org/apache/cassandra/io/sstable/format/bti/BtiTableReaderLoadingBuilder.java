@@ -70,7 +70,9 @@ public class BtiTableReaderLoadingBuilder extends SortedTableReaderLoadingBuilde
 
         try (PartitionIndex index = PartitionIndex.load(partitionIndexFileBuilder(), tableMetadataRef.getLocal().partitioner, false);
              CompressionMetadata compressionMetadata = CompressionInfoComponent.maybeLoad(descriptor, components);
-             FileHandle dFile = dataFileBuilder(statsMetadata, compressionMetadata).complete();
+             FileHandle dFile = dataFileBuilder(statsMetadata).withCompressionMetadata(compressionMetadata)
+                                                              .withCrcCheckChance(() -> tableMetadataRef.getLocal().params.crcCheckChance)
+                                                              .complete();
              FileHandle riFile = rowIndexFileBuilder().complete())
         {
             return PartitionIterator.create(index,
@@ -131,7 +133,10 @@ public class BtiTableReaderLoadingBuilder extends SortedTableReaderLoadingBuilde
 
             try (CompressionMetadata compressionMetadata = CompressionInfoComponent.maybeLoad(descriptor, components))
             {
-                builder.setDataFile(dataFileBuilder(builder.getStatsMetadata(), compressionMetadata).complete());
+                builder.setDataFile(dataFileBuilder(builder.getStatsMetadata())
+                                    .withCompressionMetadata(compressionMetadata)
+                                    .withCrcCheckChance(() -> tableMetadataRef.getLocal().params.crcCheckChance)
+                                    .complete());
             }
         }
         catch (IOException | RuntimeException | Error ex)

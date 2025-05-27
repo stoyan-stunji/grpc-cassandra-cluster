@@ -69,7 +69,6 @@ import org.apache.cassandra.utils.Throwables;
 import org.apache.cassandra.utils.concurrent.Transactional;
 
 import static com.google.common.base.Preconditions.checkNotNull;
-import static org.apache.cassandra.config.Config.DiskAccessMode;
 
 /**
  * A generic implementation of a writer which assumes the existence of some partition index and bloom filter.
@@ -349,14 +348,15 @@ public abstract class SortedTableWriter<P extends SortedTablePartitionWriter, I 
         return dataWriter.getEstimatedOnDiskBytesWritten();
     }
 
-    protected FileHandle openDataFile(long lengthOverride, StatsMetadata statsMetadata, DiskAccessMode diskAccessMode)
+    protected FileHandle openDataFile(long lengthOverride, StatsMetadata statsMetadata)
     {
         int dataBufferSize = ioOptions.diskOptimizationStrategy.bufferSize(statsMetadata.estimatedPartitionSize.percentile(ioOptions.diskOptimizationEstimatePercentile));
+
 
         FileHandle dataFile;
         try (CompressionMetadata compressionMetadata = compression ? ((CompressedSequentialWriter) dataWriter).open(lengthOverride) : null)
         {
-            dataFile = dataFileBuilder.withDiskAccessMode(diskAccessMode)
+            dataFile = dataFileBuilder.withDiskAccessMode(ioOptions.defaultDiskAccessMode)
                                       .withMmappedRegionsCache(mmappedRegionsCache)
                                       .withChunkCache(chunkCache)
                                       .withCompressionMetadata(compressionMetadata)

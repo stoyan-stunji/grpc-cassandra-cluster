@@ -1431,8 +1431,11 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
         {
             if (directIOSupported)
             {
-                return dfile.toBuilder().withDiskAccessMode(DiskAccessMode.direct).complete()
-                            .createReaderForScan(OnReaderClose.CLOSE_FILE);
+                FileHandle dataFile = dfile.toBuilder()
+                                           .withDiskAccessMode(DiskAccessMode.direct)
+                                           .complete();
+
+                return dataFile.createReaderForScan(OnReaderClose.CLOSE_FILE);
             }
             else
             {

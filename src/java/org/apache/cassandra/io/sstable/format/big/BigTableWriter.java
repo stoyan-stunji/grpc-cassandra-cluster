@@ -171,8 +171,7 @@ public class BigTableWriter extends SortedTableWriter<BigFormatPartitionWriter, 
                                         .withLengthOverride(boundary != null ? boundary.indexLength : NO_LENGTH_OVERRIDE)
                                         .complete();
             builder.setIndexFile(indexFile);
-            long dataLengthOverride = boundary != null ? boundary.dataLength : NO_LENGTH_OVERRIDE;
-            dataFile = openDataFile(dataLengthOverride, builder.getStatsMetadata(), ioOptions.defaultDiskAccessMode);
+            dataFile = openDataFile(boundary != null ? boundary.dataLength : NO_LENGTH_OVERRIDE, builder.getStatsMetadata());
             builder.setDataFile(dataFile);
             builder.setKeyCache(metadata().params.caching.cacheKeys() ? new KeyCache(CacheService.instance.keyCache) : KeyCache.NO_CACHE);
 

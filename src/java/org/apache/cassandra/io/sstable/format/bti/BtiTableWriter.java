@@ -99,8 +99,7 @@ public class BtiTableWriter extends SortedTableWriter<BtiFormatPartitionWriter, 
 
             partitionIndex = partitionIndexSupplier.get();
             rowIndexFile = indexWriter.rowIndexFHBuilder.complete();
-            long dataLengthOverride = isFinal ? NO_LENGTH_OVERRIDE : dataWriter.getLastFlushOffset();
-            dataFile = openDataFile(dataLengthOverride, builder.getStatsMetadata(), ioOptions.defaultDiskAccessMode);
+            dataFile = openDataFile(isFinal ? NO_LENGTH_OVERRIDE : dataWriter.getLastFlushOffset(), builder.getStatsMetadata());
             filter = indexWriter.getFilterCopy();
 
             return builder.setPartitionIndex(partitionIndex)

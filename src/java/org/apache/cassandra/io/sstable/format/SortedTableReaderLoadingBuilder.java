@@ -21,7 +21,6 @@ package org.apache.cassandra.io.sstable.format;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.io.compress.CompressionMetadata;
 import org.apache.cassandra.io.sstable.SSTable;
 import org.apache.cassandra.io.sstable.format.bti.BtiFormat;
 import org.apache.cassandra.io.sstable.metadata.StatsMetadata;
@@ -49,29 +48,22 @@ extends SSTableReaderLoadingBuilder<R, B>
                                                     validationMetadata);
     }
 
-    protected FileHandle.Builder dataFileBuilder(StatsMetadata statsMetadata, CompressionMetadata compressionMetadata)
+    protected FileHandle.Builder dataFileBuilder(StatsMetadata statsMetadata)
     {
         assert this.dataFileBuilder == null || this.dataFileBuilder.file.equals(descriptor.fileFor(BtiFormat.Components.DATA));
 
         logger.info("Opening {} ({})", descriptor, FBUtilities.prettyPrintMemory(descriptor.fileFor(BtiFormat.Components.DATA).length()));
 
-        if (dataFileBuilder == null)
-            dataFileBuilder = new FileHandle.Builder(descriptor.fileFor(BtiFormat.Components.DATA));
-
-        return dataFileBuilder(dataFileBuilder, statsMetadata, compressionMetadata);
-    }
-
-    private FileHandle.Builder dataFileBuilder(FileHandle.Builder builder, StatsMetadata statsMetadata,
-                                               CompressionMetadata compressionMetadata)
-    {
         long recordSize = statsMetadata.estimatedPartitionSize.percentile(ioOptions.diskOptimizationEstimatePercentile);
         int bufferSize = ioOptions.diskOptimizationStrategy.bufferSize(recordSize);
 
-        builder.bufferSize(bufferSize);
-        builder.withChunkCache(chunkCache);
-        builder.withDiskAccessMode(ioOptions.defaultDiskAccessMode);
-        builder.withCompressionMetadata(compressionMetadata);
-        builder.withCrcCheckChance(() -> tableMetadataRef.getLocal().params.crcCheckChance);
-        return builder;
+        if (dataFileBuilder == null)
+            dataFileBuilder = new FileHandle.Builder(descriptor.fileFor(BtiFormat.Components.DATA));
+
+        dataFileBuilder.bufferSize(bufferSize);
+        dataFileBuilder.withChunkCache(chunkCache);
+        dataFileBuilder.withDiskAccessMode(ioOptions.defaultDiskAccessMode);
+
+        return dataFileBuilder;
     }
 }
