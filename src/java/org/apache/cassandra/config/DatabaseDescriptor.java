@@ -80,7 +80,6 @@ import org.apache.cassandra.config.Config.CommitLogSync;
 import org.apache.cassandra.config.Config.DiskAccessMode;
 import org.apache.cassandra.config.Config.PaxosOnLinearizabilityViolation;
 import org.apache.cassandra.config.Config.PaxosStatePurging;
-import org.apache.cassandra.config.Config.ScanDiskAccessMode;
 import org.apache.cassandra.config.DurationSpec.IntMillisecondsBound;
 import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.db.commitlog.AbstractCommitLogSegmentManager;
@@ -215,7 +214,7 @@ public class DatabaseDescriptor
 
     private static DiskAccessMode commitLogWriteDiskAccessMode;
 
-    private static ScanDiskAccessMode compactionScanDiskAccessMode;
+    private static DiskAccessMode compactionScanDiskAccessMode;
 
     private static AbstractCryptoProvider cryptoProvider;
     private static IAuthenticator authenticator;
@@ -904,8 +903,7 @@ public class DatabaseDescriptor
         applyReadThresholdsValidations(conf);
 
         initializeCompactionScanDiskAccessMode();
-        if (compactionScanDiskAccessMode != conf.compaction_scan_disk_access_mode)
-            logger.info("compaction_scan_disk_access_mode resolved to: {}", compactionScanDiskAccessMode);
+        logger.info("compaction_scan_disk_access_mode resolved to: {}", compactionScanDiskAccessMode);
 
         if (conf.concurrent_materialized_view_builders <= 0)
             throw new ConfigurationException("concurrent_materialized_view_builders should be strictly greater than 0, but was " + conf.concurrent_materialized_view_builders, false);
@@ -1701,22 +1699,20 @@ public class DatabaseDescriptor
         partitionerName = partitioner.getClass().getCanonicalName();
     }
 
-    private static ScanDiskAccessMode resolveCompactionScanDiskAccessMode(ScanDiskAccessMode scanDiskAccessMode)
+    private static DiskAccessMode resolveCompactionScanDiskAccessMode(DiskAccessMode diskAccessMode)
     {
-        if (scanDiskAccessMode == ScanDiskAccessMode.direct)
+        if (diskAccessMode == DiskAccessMode.direct)
         {
             if (conf.disk_optimization_strategy == Config.DiskOptimizationStrategy.ssd)
             {
-                return ScanDiskAccessMode.direct;
+                return DiskAccessMode.direct;
             }
 
             logger.warn("Compaction scan disk access mode {} not supported on disk optimization strategy {}",
-                        ScanDiskAccessMode.direct, conf.disk_optimization_strategy);
-
-            return ScanDiskAccessMode.disk_default;
+                        DiskAccessMode.direct, conf.disk_optimization_strategy);
         }
 
-        return scanDiskAccessMode;
+        return DiskAccessMode.auto;
     }
 
     private static Pair<DiskAccessMode, Boolean> resolveCommitLogWriteDiskAccessMode(DiskAccessMode providedDiskAccessMode)
@@ -3243,13 +3239,13 @@ public class DatabaseDescriptor
         conf.commitlog_segment_size = new DataStorageSpec.IntMebibytesBound(sizeMebibytes);
     }
 
-    public static ScanDiskAccessMode getCompactionScanDiskAccessMode()
+    public static DiskAccessMode getCompactionScanDiskAccessMode()
     {
         return compactionScanDiskAccessMode;
     }
 
     @VisibleForTesting
-    public static void setCompactionScanDiskAccessMode(ScanDiskAccessMode scanDiskAccessMode)
+    public static void setCompactionScanDiskAccessMode(DiskAccessMode scanDiskAccessMode)
     {
         compactionScanDiskAccessMode = scanDiskAccessMode;
         conf.compaction_scan_disk_access_mode = scanDiskAccessMode;

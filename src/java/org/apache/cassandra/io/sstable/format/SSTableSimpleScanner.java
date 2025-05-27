@@ -27,7 +27,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import com.google.common.collect.ImmutableSet;
 
-import org.apache.cassandra.config.Config.ScanDiskAccessMode;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.rows.UnfilteredRowIterator;
 import org.apache.cassandra.io.sstable.CorruptSSTableException;
@@ -36,6 +35,7 @@ import org.apache.cassandra.io.sstable.SSTableIdentityIterator;
 import org.apache.cassandra.io.util.RandomAccessReader;
 import org.apache.cassandra.schema.TableMetadata;
 
+import static org.apache.cassandra.config.Config.DiskAccessMode;
 import static org.apache.cassandra.io.sstable.format.SSTableReader.PartitionPositionBounds;
 
 /// Simple SSTable scanner that reads sequentially through an SSTable without using the index.
@@ -71,7 +71,7 @@ implements ISSTableScanner
     /// various [SSTableReader#getScanner] variations.
     public SSTableSimpleScanner(SSTableReader sstable,
                                 Collection<PartitionPositionBounds> boundsList,
-                                ScanDiskAccessMode diskAccessMode)
+                                DiskAccessMode diskAccessMode)
     {
         assert sstable != null;
 

@@ -54,7 +54,6 @@ import org.apache.cassandra.concurrent.ExecutorPlus;
 import org.apache.cassandra.concurrent.ScheduledExecutorPlus;
 import org.apache.cassandra.concurrent.ScheduledExecutors;
 import org.apache.cassandra.config.CassandraRelevantProperties;
-import org.apache.cassandra.config.Config.ScanDiskAccessMode;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.DecoratedKey;
@@ -116,6 +115,7 @@ import org.apache.cassandra.utils.concurrent.SharedCloseable;
 import org.apache.cassandra.utils.concurrent.UncheckedInterruptedException;
 
 import static org.apache.cassandra.concurrent.ExecutorFactory.Global.executorFactory;
+import static org.apache.cassandra.config.Config.DiskAccessMode;
 import static org.apache.cassandra.io.util.FileHandle.OnReaderClose;
 import static org.apache.cassandra.utils.TimeUUID.unixMicrosToRawTimestamp;
 import static org.apache.cassandra.utils.concurrent.BlockingQueues.newBlockingQueue;
@@ -1076,16 +1076,16 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
      */
     public ISSTableScanner getScanner()
     {
-        return getScanner(ScanDiskAccessMode.disk_default);
+        return getScanner(DiskAccessMode.auto);
     }
 
-    public ISSTableScanner getScanner(ScanDiskAccessMode scanMode)
+    public ISSTableScanner getScanner(DiskAccessMode diskAccessMode)
     {
         PartitionPositionBounds fullRange = getPositionsForFullRange();
         if (fullRange != null)
-            return new SSTableSimpleScanner(this, Collections.singletonList(fullRange), scanMode);
+            return new SSTableSimpleScanner(this, Collections.singletonList(fullRange), diskAccessMode);
         else
-            return new SSTableSimpleScanner(this, Collections.emptyList(), scanMode);
+            return new SSTableSimpleScanner(this, Collections.emptyList(), diskAccessMode);
     }
 
     /**
@@ -1096,10 +1096,10 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
      */
     public ISSTableScanner getScanner(Collection<Range<Token>> ranges)
     {
-        return getScanner(ranges, ScanDiskAccessMode.disk_default);
+        return getScanner(ranges, DiskAccessMode.auto);
     }
 
-    public ISSTableScanner getScanner(Collection<Range<Token>> ranges, ScanDiskAccessMode scanMode)
+    public ISSTableScanner getScanner(Collection<Range<Token>> ranges, DiskAccessMode scanMode)
     {
         if (ranges != null)
             return new SSTableSimpleScanner(this, getPositionsForRanges(ranges), scanMode);
@@ -1115,7 +1115,7 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
      */
     public ISSTableScanner getScanner(Iterator<AbstractBounds<PartitionPosition>> boundsIterator)
     {
-        return new SSTableSimpleScanner(this, getPositionsForBoundsIterator(boundsIterator), ScanDiskAccessMode.disk_default);
+        return new SSTableSimpleScanner(this, getPositionsForBoundsIterator(boundsIterator), DiskAccessMode.auto);
     }
 
 
@@ -1423,26 +1423,29 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
 
     public RandomAccessReader openDataReaderForScan()
     {
-        return openDataReaderForScan(ScanDiskAccessMode.disk_default);
+        return openDataReaderForScan(DiskAccessMode.auto);
     }
 
-    public RandomAccessReader openDataReaderForScan(ScanDiskAccessMode scanDiskAccessMode)
+    public RandomAccessReader openDataReaderForScan(DiskAccessMode diskAccessMode)
     {
-        switch (scanDiskAccessMode)
+        if (diskAccessMode == null || diskAccessMode == DiskAccessMode.auto)
         {
-            case direct:
-                if (directIOSupported)
-                {
-                    return directDataFileSupplier.get().createReaderForScan(OnReaderClose.CLOSE_FILE);
-                }
-                else
-                {
-                    return dfile.createReaderForScan(OnReaderClose.RETAIN_FILE_OPEN);
-                }
-            case disk_default:
+            return dfile.createReaderForScan(OnReaderClose.RETAIN_FILE_OPEN);
+        }
+        else if (diskAccessMode == DiskAccessMode.direct)
+        {
+            if (directIOSupported)
+            {
+                return directDataFileSupplier.get().createReaderForScan(OnReaderClose.CLOSE_FILE);
+            }
+            else
+            {
                 return dfile.createReaderForScan(OnReaderClose.RETAIN_FILE_OPEN);
-            default:
-                throw new IllegalArgumentException("Unknown scan mode " + scanDiskAccessMode);
+            }
+        }
+        else
+        {
+            throw new IllegalArgumentException("Unsupported scan disk access mode " + diskAccessMode);
         }
     }
 

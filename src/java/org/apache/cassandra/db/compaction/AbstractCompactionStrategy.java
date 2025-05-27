@@ -28,11 +28,10 @@ import java.util.Set;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableMap;
-import org.apache.cassandra.config.Config.ScanDiskAccessMode;
-import org.apache.cassandra.config.DatabaseDescriptor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Directories;
 import org.apache.cassandra.db.SerializationHeader;
@@ -54,6 +53,7 @@ import org.apache.cassandra.io.sstable.metadata.StatsMetadata;
 import org.apache.cassandra.schema.CompactionParams;
 import org.apache.cassandra.utils.TimeUUID;
 
+import static org.apache.cassandra.config.Config.DiskAccessMode;
 import static org.apache.cassandra.utils.Clock.Global.currentTimeMillis;
 
 /**
@@ -584,7 +584,7 @@ public abstract class AbstractCompactionStrategy
         return true;
     }
 
-    protected static ScanDiskAccessMode compactionScanDiskAccessMode()
+    protected static DiskAccessMode compactionScanDiskAccessMode()
     {
         return DatabaseDescriptor.getCompactionScanDiskAccessMode();
     }
