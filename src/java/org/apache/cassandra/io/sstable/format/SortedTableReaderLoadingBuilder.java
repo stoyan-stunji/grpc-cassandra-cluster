@@ -26,12 +26,9 @@ import org.apache.cassandra.io.sstable.SSTable;
 import org.apache.cassandra.io.sstable.format.bti.BtiFormat;
 import org.apache.cassandra.io.sstable.metadata.StatsMetadata;
 import org.apache.cassandra.io.sstable.metadata.ValidationMetadata;
-import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.io.util.FileHandle;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.IFilter;
-
-import static org.apache.cassandra.config.Config.DiskAccessMode;
 
 public abstract class SortedTableReaderLoadingBuilder<R extends SSTableReader, B extends SSTableReader.Builder<R, B>>
 extends SSTableReaderLoadingBuilder<R, B>
@@ -62,19 +59,6 @@ extends SSTableReaderLoadingBuilder<R, B>
             dataFileBuilder = new FileHandle.Builder(descriptor.fileFor(BtiFormat.Components.DATA));
 
         return dataFileBuilder(dataFileBuilder, statsMetadata, compressionMetadata);
-    }
-
-    protected FileHandle getDataFile(StatsMetadata statsMetadata, CompressionMetadata compressionMetadata,
-                                     DiskAccessMode diskAccessMode)
-    {
-        File file = descriptor.fileFor(BtiFormat.Components.DATA);
-
-        logger.debug("Opening {} ({})", descriptor, FBUtilities.prettyPrintMemory(file.length()));
-
-        FileHandle.Builder fileBuilder = new FileHandle.Builder(file)
-                                         .withDiskAccessMode(diskAccessMode);
-
-        return dataFileBuilder(fileBuilder, statsMetadata, compressionMetadata).complete();
     }
 
     private FileHandle.Builder dataFileBuilder(FileHandle.Builder builder, StatsMetadata statsMetadata,

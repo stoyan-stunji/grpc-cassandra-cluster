@@ -108,7 +108,6 @@ public class BtiTableWriter extends SortedTableWriter<BtiFormatPartitionWriter, 
                           .setLast(partitionIndex.lastKey())
                           .setRowIndexFile(rowIndexFile)
                           .setDataFile(dataFile)
-                          .setDataFileFactory(diskAccessMode -> openDataFile(dataLengthOverride, builder.getStatsMetadata(), diskAccessMode))
                           .setFilter(filter)
                           .build(owner().orElse(null), true, true);
         }

@@ -72,12 +72,26 @@ public class FileHandle extends SharedCloseableImpl
 
     private final DiskAccessMode diskAccessMode;
 
+    // Properties to support unbuilding via toBuilder
+    private final ChunkCache chunkCache;
+    private final MmappedRegionsCache mmappedRegionsCache;
+    private final Supplier<Double> crcCheckChanceSupplier;
+    private final long lengthOverride;
+    private final int bufferSize;
+    private final BufferType bufferType;
+
     private FileHandle(Cleanup cleanup,
                        ChannelProxy channel,
                        RebuffererFactory rebuffererFactory,
                        CompressionMetadata compressionMetadata,
                        long onDiskLength,
-                       DiskAccessMode diskAccessMode)
+                       DiskAccessMode diskAccessMode,
+                       ChunkCache chunkCache,
+                       MmappedRegionsCache mmappedRegionsCache,
+                       Supplier<Double> crcCheckChanceSupplier,
+                       long lengthOverride,
+                       int bufferSize,
+                       BufferType bufferType)
     {
         super(cleanup);
         this.rebuffererFactory = rebuffererFactory;
@@ -85,6 +99,12 @@ public class FileHandle extends SharedCloseableImpl
         this.compressionMetadata = Optional.ofNullable(compressionMetadata);
         this.onDiskLength = onDiskLength;
         this.diskAccessMode = diskAccessMode;
+        this.chunkCache = chunkCache;
+        this.mmappedRegionsCache = mmappedRegionsCache;
+        this.crcCheckChanceSupplier = crcCheckChanceSupplier;
+        this.lengthOverride = lengthOverride;
+        this.bufferSize = bufferSize;
+        this.bufferType = bufferType;
     }
 
     private FileHandle(FileHandle copy)
@@ -95,6 +115,25 @@ public class FileHandle extends SharedCloseableImpl
         compressionMetadata = copy.compressionMetadata;
         onDiskLength = copy.onDiskLength;
         diskAccessMode = copy.diskAccessMode;
+        chunkCache = copy.chunkCache;
+        mmappedRegionsCache = copy.mmappedRegionsCache;
+        crcCheckChanceSupplier = copy.crcCheckChanceSupplier;
+        lengthOverride = copy.lengthOverride;
+        bufferSize = copy.bufferSize;
+        bufferType = copy.bufferType;
+    }
+
+    public Builder toBuilder()
+    {
+        return new FileHandle.Builder(file())
+               .withDiskAccessMode(diskAccessMode)
+               .withCrcCheckChance(crcCheckChanceSupplier)
+               .withMmappedRegionsCache(mmappedRegionsCache)
+               .withCompressionMetadata(compressionMetadata.orElse(null))
+               .withLengthOverride(lengthOverride)
+               .withChunkCache(chunkCache)
+               .bufferSize(bufferSize)
+               .bufferType(bufferType);
     }
 
     /**
@@ -478,7 +517,8 @@ public class FileHandle extends SharedCloseableImpl
                 }
 
                 Cleanup cleanup = new Cleanup(channel, rebuffererFactory, compressionMetadata, chunkCache);
-                return new FileHandle(cleanup, channel, rebuffererFactory, compressionMetadata, length, diskAccessMode);
+                return new FileHandle(cleanup, channel, rebuffererFactory, compressionMetadata, length, diskAccessMode, chunkCache,
+                                      mmappedRegionsCache, crcCheckChanceSupplier, lengthOverride, bufferSize, bufferType);
             }
             catch (Throwable t)
             {

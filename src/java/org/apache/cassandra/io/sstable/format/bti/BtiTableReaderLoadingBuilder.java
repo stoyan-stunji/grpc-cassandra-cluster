@@ -132,7 +132,6 @@ public class BtiTableReaderLoadingBuilder extends SortedTableReaderLoadingBuilde
             try (CompressionMetadata compressionMetadata = CompressionInfoComponent.maybeLoad(descriptor, components))
             {
                 builder.setDataFile(dataFileBuilder(builder.getStatsMetadata(), compressionMetadata).complete());
-                builder.setDataFileFactory(diskAccessMode -> getDataFile(builder.getStatsMetadata(), compressionMetadata, diskAccessMode));
             }
         }
         catch (IOException | RuntimeException | Error ex)
