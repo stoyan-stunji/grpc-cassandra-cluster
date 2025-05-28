@@ -53,7 +53,7 @@ public class DirectThreadLocalReadAheadBufferTest extends ThreadLocalReadAheadBu
         try (ChannelProxy bufferedChannel = new ChannelProxy(propertyInputs.file);
              ChannelProxy directChannel = new ChannelProxy(propertyInputs.file, ChannelProxy.IOMode.DIRECT))
         {
-            ThreadLocalReadAheadBuffer tlrab = new DirectThreadLocalReadAheadBuffer(directChannel, bufferSize, blockSize);
+            ThreadLocalReadAheadBuffer tlrab = DirectThreadLocalReadAheadBuffer.create(directChannel, bufferSize, blockSize);
             for (Pair<Long, Integer> read : propertyInputs.positionsAndLengths)
             {
                 testRead(read, bufferedChannel, tlrab);
