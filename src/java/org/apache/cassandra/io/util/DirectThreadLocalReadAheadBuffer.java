@@ -29,14 +29,9 @@ public final class DirectThreadLocalReadAheadBuffer extends ThreadLocalReadAhead
 
     private final int blockSize;
 
-    public DirectThreadLocalReadAheadBuffer(ChannelProxy channel, int bufferSize, int blockSize)
+    private DirectThreadLocalReadAheadBuffer(ChannelProxy channel, int bufferSize, int blockSize)
     {
-        super(channel,
-              BitUtil.align(bufferSize, blockSize),
-              () -> {
-                  int capacity = BitUtil.align(bufferSize, blockSize);
-                  return BufferUtil.allocateDirectAligned(capacity, blockSize);
-              });
+        super(channel, bufferSize, () -> BufferUtil.allocateDirectAligned(bufferSize, blockSize));
         this.blockSize = blockSize;
     }
 
@@ -48,5 +43,10 @@ public final class DirectThreadLocalReadAheadBuffer extends ThreadLocalReadAhead
 
         if (channel.read(blockBuffer, blockPosition) < sizeToRead)
             throw new CorruptSSTableException(null, channel.filePath());
+    }
+
+    public static DirectThreadLocalReadAheadBuffer create(ChannelProxy channel, int bufferSize, int blockSize)
+    {
+        return new DirectThreadLocalReadAheadBuffer(channel, BitUtil.align(bufferSize, blockSize), blockSize);
     }
 }

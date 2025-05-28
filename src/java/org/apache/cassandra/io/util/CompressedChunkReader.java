@@ -291,7 +291,7 @@ public abstract class CompressedChunkReader extends AbstractReaderFileProxy impl
             this.scanReader = (readAheadBufferSize > 0 && readAheadBufferSize > metadata.chunkLength())
                               ? new ScanCompressedReader(channel,
                                                          new DirectThreadLocalByteBufferHolder(blockSize),
-                                                         new DirectThreadLocalReadAheadBuffer(channel, readAheadBufferSize, blockSize))
+                                                         DirectThreadLocalReadAheadBuffer.create(channel, readAheadBufferSize, blockSize))
                               : null;
         }
 

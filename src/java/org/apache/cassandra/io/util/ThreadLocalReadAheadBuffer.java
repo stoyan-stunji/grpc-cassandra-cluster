@@ -57,7 +57,7 @@ public class ThreadLocalReadAheadBuffer
         this(channel, bufferSize, () -> bufferType.allocate(bufferSize));
     }
 
-    protected ThreadLocalReadAheadBuffer(ChannelProxy channel, int bufferSize, Supplier<ByteBuffer> bufferSupplier)
+    ThreadLocalReadAheadBuffer(ChannelProxy channel, int bufferSize, Supplier<ByteBuffer> bufferSupplier)
     {
         this.channel = channel;
         this.channelSize = channel.size();
