@@ -19,6 +19,7 @@
 package org.apache.cassandra.io.util;
 
 import java.nio.ByteBuffer;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import accord.utils.Gen;
@@ -49,7 +50,7 @@ public abstract class CompressedChunkReaderTest
         int minLength = 1024;
         int maxLength = 1024 * 64;
         return Gens.pick(Stream.iterate(minLength, n -> n <= maxLength, n -> n * 2)
-                               .toList());
+                               .collect(Collectors.toList()));
     }
 
     static Gen<CompressionParams> compressionParams(Gen<Integer> chunkLengths)
