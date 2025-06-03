@@ -275,19 +275,16 @@ public abstract class CompressedChunkReader extends AbstractReaderFileProxy impl
     public static class Direct extends CompressedChunkReader
     {
 
-        private final CompressedReader compressedReader;
+        private final CompressedReader reader;
         private final CompressedReader scanReader;
-        private final CompressedReader uncompressedReader;
 
         public Direct(ChannelProxy channel, CompressionMetadata metadata, Supplier<Double> crcCheckChanceSupplier)
         {
             super(channel, metadata, crcCheckChanceSupplier);
             int blockSize = FileUtils.getFileBlockSize(channel.file());
-            this.compressedReader = new DirectRandomAccessReader(channel, blockSize);
-            this.uncompressedReader = new DirectRandomAccessReader(channel, blockSize);
+            this.reader = new DirectRandomAccessReader(channel, blockSize);
 
             int readAheadBufferSize = DatabaseDescriptor.getCompressedReadAheadBufferSize();
-
             this.scanReader = (readAheadBufferSize > 0 && readAheadBufferSize > metadata.chunkLength())
                               ? new ScanCompressedReader(channel,
                                                          new DirectThreadLocalByteBufferHolder(blockSize),
@@ -307,7 +304,7 @@ public abstract class CompressedChunkReader extends AbstractReaderFileProxy impl
                 boolean shouldCheckCrc = shouldCheckCrc();
 
                 uncompressed.clear();
-                CompressedReader readFrom = (scanReader != null && scanReader.allocated()) ? scanReader : compressedReader;
+                CompressedReader readFrom = (scanReader != null && scanReader.allocated()) ? scanReader : reader;
                 if (chunk.length < maxCompressedLength)
                 {
                     ByteBuffer compressed = readFrom.read(chunk, shouldCheckCrc);
@@ -322,7 +319,7 @@ public abstract class CompressedChunkReader extends AbstractReaderFileProxy impl
                 }
                 else
                 {
-                    ByteBuffer buffer = uncompressedReader.read(chunk, shouldCheckCrc);
+                    ByteBuffer buffer = reader.read(chunk, shouldCheckCrc);
                     uncompressed.put(buffer);
                 }
 
@@ -355,7 +352,7 @@ public abstract class CompressedChunkReader extends AbstractReaderFileProxy impl
         @Override
         public void close()
         {
-            compressedReader.close();
+            reader.close();
             if (scanReader != null)
                 scanReader.close();
 
