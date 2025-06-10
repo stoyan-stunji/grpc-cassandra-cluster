@@ -18,6 +18,7 @@
 
 package org.apache.cassandra.io.util;
 
+import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -32,6 +33,7 @@ import org.apache.cassandra.io.compress.CompressionMetadata;
 import org.apache.cassandra.io.filesystem.ListenableFileSystem;
 import org.apache.cassandra.io.sstable.metadata.MetadataCollector;
 import org.apache.cassandra.schema.CompressionParams;
+import org.assertj.core.api.Assertions;
 
 import static accord.utils.Property.qt;
 
@@ -80,9 +82,35 @@ public class StandardCompressedChunkReaderTest extends CompressedChunkReaderTest
         });
     }
 
-    @Override
-    protected CompressedChunkReader getReader(ChannelProxy channel, CompressionMetadata metadata)
+    protected void doReads(File f, CompressionMetadata metadata, long length, boolean useReadAhead)
     {
-        return new CompressedChunkReader.Standard(channel, metadata, () -> 1d);
+        ByteBuffer buffer = ByteBuffer.allocateDirect(metadata.chunkLength());
+
+        try (ChannelProxy channel = new ChannelProxy(f);
+        )
+        {
+            try (CompressedChunkReader reader = new CompressedChunkReader.Standard(channel, metadata, () -> 1d);
+                 metadata)
+            {
+                if (useReadAhead)
+                    reader.forScan();
+
+                long offset = 0;
+                long maxOffset = length * Long.BYTES;
+                do
+                {
+                    reader.readChunk(offset, buffer);
+                    for (long expected = offset / Long.BYTES; buffer.hasRemaining(); expected++)
+                        Assertions.assertThat(buffer.getLong()).isEqualTo(expected);
+
+                    offset += metadata.chunkLength();
+                }
+                while (offset < maxOffset);
+            }
+        }
+        finally
+        {
+            FileUtils.clean(buffer);
+        }
     }
 }

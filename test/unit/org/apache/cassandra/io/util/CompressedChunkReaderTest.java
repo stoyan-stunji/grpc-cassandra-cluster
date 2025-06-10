@@ -18,39 +18,30 @@
 
 package org.apache.cassandra.io.util;
 
-import java.nio.ByteBuffer;
-import java.util.stream.Collectors;
-import java.util.stream.Stream;
-
 import accord.utils.Gen;
 import accord.utils.Gens;
-import org.apache.cassandra.io.compress.CompressionMetadata;
 import org.apache.cassandra.schema.CompressionParams;
-import org.assertj.core.api.Assertions;
 
 public abstract class CompressedChunkReaderTest
 {
 
     static Gen<SequentialWriterOption> writerOptions()
     {
-        Gen<Integer> bufferSizes = Gens.constant(1 << 10); //.pickInt(1 << 4, 1 << 10, 1 << 15);
-        return rs -> SequentialWriterOption.newBuilder()
-                                           .finishOnClose(false)
-                                           .bufferSize(bufferSizes.next(rs))
-                                           .build();
+        Gen<Integer> bufferSizes = Gens.constant(1 << 10);
+        return rs -> writerOption(bufferSizes.next(rs));
+    }
+
+    static SequentialWriterOption writerOption(int bufferSize)
+    {
+        return SequentialWriterOption.newBuilder()
+                                     .finishOnClose(false)
+                                     .bufferSize(bufferSize)
+                                     .build();
     }
 
     enum CompressionKind
     {
         Noop, Snappy, Deflate, Lz4, Zstd
-    }
-
-    static Gen<Integer> mixedChunkLengths()
-    {
-        int minLength = 1024;
-        int maxLength = 1024 * 64;
-        return Gens.pick(Stream.iterate(minLength, n -> n <= maxLength, n -> n * 2)
-                               .collect(Collectors.toList()));
     }
 
     static Gen<CompressionParams> compressionParams(Gen<Integer> chunkLengths)
@@ -75,40 +66,4 @@ public abstract class CompressedChunkReaderTest
             }
         };
     }
-
-    protected void doReads(File f, CompressionMetadata metadata, long length, boolean useReadAhead)
-    {
-        ByteBuffer buffer = ByteBuffer.allocateDirect(metadata.chunkLength());
-
-        try (ChannelProxy channel = getChannel(f);
-             CompressedChunkReader reader = getReader(channel, metadata);
-             metadata)
-        {
-            if (useReadAhead)
-                reader.forScan();
-
-            long offset = 0;
-            long maxOffset = length * Long.BYTES;
-            do
-            {
-                reader.readChunk(offset, buffer);
-                for (long expected = offset / Long.BYTES; buffer.hasRemaining(); expected++)
-                    Assertions.assertThat(buffer.getLong()).isEqualTo(expected);
-
-                offset += metadata.chunkLength();
-            }
-            while (offset < maxOffset);
-        }
-        finally
-        {
-            FileUtils.clean(buffer);
-        }
-    }
-
-    protected ChannelProxy getChannel(File file)
-    {
-        return new ChannelProxy(file);
-    }
-
-    protected abstract CompressedChunkReader getReader(ChannelProxy channel, CompressionMetadata metadata);
 }
