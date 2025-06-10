@@ -459,13 +459,17 @@ public class FileHandle extends SharedCloseableImpl
             switch (diskAccessMode)
             {
                 case mmap:
-                case mmap_index_only:
                 case standard:
                     return ChannelProxy.IOMode.BUFFERED;
                 case direct:
                     return ChannelProxy.IOMode.DIRECT;
                 default:
-                    throw new IllegalStateException("Unable to determine IOMode for diskAccessMode: " + diskAccessMode);
+                    // By the time this code is reached, 'auto', 'legacy' and 'mmap_index_only' modes should have been
+                    // resolved into one of the specific modes above. Reaching this default block indicates a logic
+                    // error in the configuration startup code.
+                    String expectedModes = String.format("[%s, %s, %s]", DiskAccessMode.mmap, DiskAccessMode.standard, DiskAccessMode.direct);
+                    throw new IllegalStateException(String.format("Unexpected or unresolved diskAccessMode '%s'. Expected one of %s.",
+                                                                  diskAccessMode, expectedModes));
             }
         }
 
