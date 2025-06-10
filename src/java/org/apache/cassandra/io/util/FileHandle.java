@@ -451,13 +451,22 @@ public class FileHandle extends SharedCloseableImpl
          */
         public FileHandle complete()
         {
-            return complete(file -> {
-                ChannelProxy.IOMode ioMode = diskAccessMode == DiskAccessMode.direct
-                                             ? ChannelProxy.IOMode.DIRECT
-                                             : ChannelProxy.IOMode.BUFFERED;
+            return complete(file -> new ChannelProxy(file, ioMode()));
+        }
 
-                return new ChannelProxy(file, ioMode);
-            });
+        private ChannelProxy.IOMode ioMode()
+        {
+            switch (diskAccessMode)
+            {
+                case mmap:
+                case mmap_index_only:
+                case standard:
+                    return ChannelProxy.IOMode.BUFFERED;
+                case direct:
+                    return ChannelProxy.IOMode.DIRECT;
+                default:
+                    throw new IllegalStateException("Unable to determine IOMode for diskAccessMode: " + diskAccessMode);
+            }
         }
 
         @VisibleForTesting

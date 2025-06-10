@@ -39,6 +39,7 @@ public final class DirectThreadLocalReadAheadBuffer extends ThreadLocalReadAhead
     protected void loadBlock(ByteBuffer blockBuffer, long blockPosition, int sizeToRead)
     {
         int alignedSizeToRead = BitUtil.align(sizeToRead, blockSize);
+
         blockBuffer.limit(alignedSizeToRead);
 
         if (channel.read(blockBuffer, blockPosition) < sizeToRead)
