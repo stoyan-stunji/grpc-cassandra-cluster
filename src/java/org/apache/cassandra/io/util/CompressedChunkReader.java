@@ -146,12 +146,11 @@ public abstract class CompressedChunkReader extends AbstractReaderFileProxy impl
             if (channel.read(buffer, alignedPos) < length + delta)
                 throw new CorruptBlockException(channel.filePath(), chunk);
 
-            buffer.flip();
             buffer.position(delta);
             buffer.limit(delta + length);
 
             ByteBuffer slice = buffer.slice();
-            slice.limit(chunk.length);
+            slice.limit(chunk.length); // limit at chunk content end (before CRC)
 
             if (shouldCheckCrc)
             {
