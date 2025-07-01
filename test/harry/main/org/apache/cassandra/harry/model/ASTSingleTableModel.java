@@ -68,6 +68,9 @@ import org.apache.cassandra.cql3.ast.Value;
 import org.apache.cassandra.cql3.ast.Visitor;
 import org.apache.cassandra.db.BufferClustering;
 import org.apache.cassandra.db.Clustering;
+import org.apache.cassandra.db.ClusteringBound;
+import org.apache.cassandra.db.Slice;
+import org.apache.cassandra.db.Slices;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.BooleanType;
 import org.apache.cassandra.db.marshal.Int32Type;
@@ -500,7 +503,7 @@ public class ASTSingleTableModel
     }
 
     private enum DeleteKind
-    {PARTITION, ROW, COLUMN}
+    {PARTITION, ROW, COLUMN, RANGE}
     private void update(Mutation.Delete delete)
     {
         long nowTs = delete.timestampOrDefault(numMutations);
@@ -517,6 +520,8 @@ public class ASTSingleTableModel
             DeleteKind kind = DeleteKind.PARTITION;
             if (!delete.columns.isEmpty())
                 kind = DeleteKind.COLUMN;
+            else if (containsRangeCondition(split.right))
+                kind = DeleteKind.RANGE;
             else if (!clusterings.isEmpty())
                 kind = DeleteKind.ROW;
 
@@ -550,10 +555,38 @@ public class ASTSingleTableModel
                         }
                     }
                     break;
+                case RANGE:
+                    LookupContext ctx = new LookupContext(delete);
+                    for (BytesPartitionState.Row value : partition.rows())
+                    {
+                        if (ctx.include(value))
+                            partition.deleteRow(value.clustering, nowTs);
+                    }
+                    break;
                 default:
                     throw new UnsupportedOperationException();
             }
         }
+    }
+
+    private boolean containsRangeCondition(List<Conditional> conditionals)
+    {
+        for (Conditional cond : conditionals)
+        {
+            if (!(cond instanceof Conditional.Where))
+                continue;
+
+            Conditional.Where where = (Conditional.Where) cond;
+            switch (where.kind)
+            {
+                case GREATER_THAN:
+                case GREATER_THAN_EQ:
+                case LESS_THAN:
+                case LESS_THAN_EQ:
+                    return true;
+            }
+        }
+        return false;
     }
 
     private static void maybeUpdateColumns(Set<Symbol> columns,
@@ -772,6 +805,7 @@ public class ASTSingleTableModel
         // pk requires equality
         Map<Symbol, List<ByteBuffer>> pks = new HashMap<>();
         List<Conditional> other = new ArrayList<>();
+        Map<Symbol, List<Conditional.Where>> rangeConditions = new HashMap<>();
         for (Conditional c : conditionals)
         {
             if (c instanceof Conditional.Where)
@@ -784,6 +818,13 @@ public class ASTSingleTableModel
                     if (pks.containsKey(col))
                         throw new IllegalArgumentException("Partition column " + col + " was defined multiple times in the WHERE clause");
                     pks.put(col, Collections.singletonList(bb));
+                }
+                else if ((w.kind == Inequality.GREATER_THAN || w.kind == Inequality.LESS_THAN
+                          || w.kind == Inequality.GREATER_THAN_EQ || w.kind == Inequality.LESS_THAN_EQ)
+                         && columns.contains(w.lhs))
+                {
+                    Symbol col = (Symbol) w.lhs;
+                    rangeConditions.computeIfAbsent(col, __ -> new ArrayList<>()).add(w);
                 }
                 else
                 {
@@ -811,6 +852,79 @@ public class ASTSingleTableModel
                 other.add(c);
             }
         }
+        if (!rangeConditions.isEmpty())
+        {
+
+            Slices.Builder builder = new Slices.Builder(factory.clusteringComparator);
+
+            for (Map.Entry<Symbol, List<Conditional.Where>> entry : rangeConditions.entrySet())
+            {
+                List<Conditional.Where> conds = entry.getValue();
+                ByteBuffer lower = null;
+                ByteBuffer upper = null;
+                boolean includeLower = false;
+                boolean includeUpper = false;
+
+                for (Conditional.Where cond : conds)
+                {
+                    ByteBuffer val = eval(cond.rhs);
+                    switch (cond.kind)
+                    {
+                        case GREATER_THAN: lower = val; includeLower = false; break;
+                        case GREATER_THAN_EQ: lower = val; includeLower = true; break;
+                        case LESS_THAN: upper = val; includeUpper = false; break;
+                        case LESS_THAN_EQ: upper = val; includeUpper = true; break;
+                    }
+                }
+
+                ClusteringBound start, end;
+
+                if (lower == null)
+                {
+                    start = ClusteringBound.BOTTOM;
+                }
+                else
+                {
+                    if  (includeLower)
+                        start = ClusteringBound.inclusiveStartOf(factory.clusteringComparator.make(lower));
+                    else
+                        start = ClusteringBound.exclusiveStartOf(factory.clusteringComparator.make(lower));
+                }
+
+
+                if (upper == null)
+                {
+                    end = ClusteringBound.TOP;
+                }
+                else
+                {
+                    if (includeUpper)
+                        end = ClusteringBound.inclusiveEndOf(factory.clusteringComparator.make(upper));
+                    else
+                        end = ClusteringBound.exclusiveEndOf(factory.clusteringComparator.make(upper));
+                }
+
+                builder.add(Slice.make(start, end));
+            }
+
+            Slices slices = builder.build();
+
+            List<Clustering<ByteBuffer>> clusterings = new ArrayList<>();
+
+            for (Slice slice : slices)
+            {
+                ClusteringBound<?> start = slice.start();
+                ClusteringBound<?> end = slice.end();
+
+                if (!start.isBottom())
+                    clusterings.add(createClusteringBound(start));
+
+                if (!end.isTop())
+                    clusterings.add(createClusteringBound(start));
+            }
+            return Pair.create(clusterings, other);
+
+        }
         if (!columns.equals(pks.keySet()))
         {
             var missing = Sets.difference(columns, pks.keySet());
@@ -819,6 +933,20 @@ public class ASTSingleTableModel
 
         List<Clustering<ByteBuffer>> partitionKeys = keys(columns, pks);
         return Pair.create(partitionKeys, other);
+    }
+
+    private static Clustering<ByteBuffer> createClusteringBound(ClusteringBound<?> bound)
+    {
+        if (bound == null)
+            throw new IllegalArgumentException("ClusteringBound should not be null.");
+
+        int size = bound.size();
+        ByteBuffer[] values = new ByteBuffer[size];
+
+        for (int i = 0; i < size; i++)
+            values[i] = (ByteBuffer) bound.get(i);
+
+        return Clustering.make(values);
     }
 
     private static ImmutableUniqueList<Clustering<ByteBuffer>> keys(Collection<Symbol> columns, Map<Symbol, List<ByteBuffer>> columnValues)
@@ -1539,6 +1667,7 @@ public class ASTSingleTableModel
 
     private Clustering<ByteBuffer> key(Map<Symbol, Expression> values, ImmutableUniqueList<Symbol> columns)
     {
+        if (columns.isEmpty()) return Clustering.EMPTY;
         // same as keys, but only one possible value can happen
         List<Clustering<ByteBuffer>> keys = keys(Maps.transformValues(values, Collections::singletonList), columns);
         Preconditions.checkState(keys.size() == 1, "Expected 1 key, but found %d", keys.size());
