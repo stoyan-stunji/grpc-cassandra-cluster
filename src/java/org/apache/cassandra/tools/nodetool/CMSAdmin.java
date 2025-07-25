@@ -18,6 +18,7 @@
 
 package org.apache.cassandra.tools.nodetool;
 
+import java.io.IOException;
 import java.io.PrintStream;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -31,6 +32,7 @@ import io.airlift.airline.Arguments;
 import io.airlift.airline.Command;
 import io.airlift.airline.Option;
 import org.apache.cassandra.tcm.Epoch;
+import org.apache.cassandra.tcm.serialization.Version;
 import org.apache.cassandra.tools.NodeProbe;
 import org.apache.cassandra.tools.NodeTool;
 
@@ -267,6 +269,74 @@ public abstract class CMSAdmin extends NodeTool.NodeToolCmd
         public void execute(NodeProbe probe)
         {
             probe.getCMSOperationsProxy().resumeDropAccordTable(tableId);
+        }
+    }
+
+    @Command(name = "dump", description = "Dumps cluster metadata into a file")
+    public static class DumpClusterMetadata extends NodeTool.NodeToolCmd
+    {
+
+        @Option(title = "Epoch", name = { "-e", "--epoch" }, required = false,
+        description = "Epoch at which cluster metadata should be dumped")
+        private Long epoch;
+
+        @Option(title = "Transform Epoch", name = { "-te", "--transform-epoch" }, required = false,
+        description = "Force metadata to given X epoch while dumping")
+        private Long transformEpoch;
+
+        @Option(title = "Serialization Version", name = { "-sv", "--serialization-version" }, required = false,
+        description = "Serialization Version")
+        private Version version;
+
+        protected void execute(NodeProbe probe)
+        {
+            if (epoch == null && transformEpoch == null && version == null)
+            {
+                try
+                {
+                    String fileLocation = probe.getCMSOperationsProxy().dumpClusterMetadata();
+                    printCMSDumpLocation(probe, fileLocation);
+                }
+                catch (IOException e)
+                {
+                    throw new RuntimeException(e);
+                }
+            }
+            else if (epoch != null && transformEpoch != null && version != null)
+            {
+                try
+                {
+                    String fileLocation = probe.getCMSOperationsProxy().dumpClusterMetadata(epoch,
+                                                                                            transformEpoch,
+                                                                                            version.name());
+                    printCMSDumpLocation(probe, fileLocation);
+                }
+                catch (IOException e)
+                {
+                    throw new RuntimeException(e);
+                }
+            }
+            else
+            {
+                List<String> invalidArgs = new ArrayList<>(2);
+                if (null == epoch)
+                    invalidArgs.add("epoch");
+
+                if (null == transformEpoch)
+                    invalidArgs.add("transform-epoch");
+
+                if (null == version)
+                    invalidArgs.add("version");
+
+                throw  new IllegalArgumentException("The three aguments epoch, transform-epoch and version " +
+                                                    "should be specified together. Arguments " +
+                                                    String.join(",", invalidArgs) + " must be passed.");
+            }
+        }
+
+        private void printCMSDumpLocation(NodeProbe probe, String fileLocation)
+        {
+            probe.output().out.println("Cluster Metadata dump available at " + fileLocation);
         }
     }
 }

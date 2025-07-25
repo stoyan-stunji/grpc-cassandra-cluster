@@ -275,6 +275,7 @@ public class NodeTool
                .withCommand(CMSAdmin.Snapshot.class)
                .withCommand(CMSAdmin.Unregister.class)
                .withCommand(CMSAdmin.AbortInitialization.class)
+               .withCommand(CMSAdmin.DumpClusterMetadata.class)
                .withCommand(CMSAdmin.DumpDirectory.class)
                .withCommand(CMSAdmin.DumpLog.class)
                .withCommand(CMSAdmin.ResumeDropAccordTable.class);
