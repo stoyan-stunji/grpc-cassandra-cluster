@@ -888,7 +888,7 @@ public class ASTGenerators
                                 LinkedHashSet<Symbol> columns,
                                 @Nullable Gen <? extends Map<Symbol, Object>> gen)
         {
-            if (gen == null)
+            if (gen != null)
                 throw new UnsupportedOperationException("TODO: add support later... fine to ignore for now");
 
             List<Symbol> columnList = new ArrayList<>(columns);

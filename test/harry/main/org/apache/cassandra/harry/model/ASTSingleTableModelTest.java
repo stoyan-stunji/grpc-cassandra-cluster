@@ -553,6 +553,33 @@ public class ASTSingleTableModelTest
                              .where("ck", Inequality.LESS_THAN_EQ, 9).build());
     }
 
+
+    @Test
+    public void testClusteringRangeDeleteBetween()
+    {
+        TableMetadata metadata = new Builder().pk(1).ck(1).statics(0).regular(1).build();
+        ASTSingleTableModel model = new ASTSingleTableModel(metadata);
+
+        for (int i = 0; i < 10; i++)
+        {
+            model.update(Mutation.insert(metadata)
+                                 .value("pk", 0)
+                                 .value("ck", i)
+                                 .value("v", i)
+                                 .build());
+        }
+
+        model.update(Mutation.delete(metadata)
+                             .value("pk", 0)
+                             .between("ck", Bind.of(0), Literal.of(6))
+                             .build());
+
+        model.validate(rows(row(metadata, 0, 7, 7), row(metadata, 0, 8, 8), row(metadata,0,9,9)),
+                       Select.builder(metadata).value("pk", 0)
+                             .where("ck", Inequality.GREATER_THAN_EQ, 0)
+                             .where("ck", Inequality.LESS_THAN_EQ, 9).build());
+    }
+
     @Test
     public void tokenEqIncludesEmptyPartition()
     {
