@@ -46,13 +46,37 @@ import org.apache.cassandra.utils.FBUtilities;
 
 public class MutationJournal
 {
-    public static final MutationJournal instance = new MutationJournal();
+    private static final MutationJournal instance = DatabaseDescriptor.getMutationTrackingEnabled() ? new MutationJournal() : null;
 
     private final Journal<ShortMutationId, Mutation> journal;
 
     private MutationJournal()
     {
-        this(new File(DatabaseDescriptor.getCommitLogLocation()), new JournalParams());
+        this(new File(DatabaseDescriptor.getMutationTrackingJournalDirectory()), new JournalParams());
+    }
+
+    public static void start()
+    {
+        if (instance == null)
+            return;
+
+        instance.startInternal();
+    }
+
+    public static void shutdown()
+    {
+        if (instance == null)
+            return;
+
+        instance.shutdownBlocking();
+    }
+
+    public static MutationJournal instance()
+    {
+        if (instance == null)
+            throw new IllegalStateException("Mutation tracking is not enabled");
+
+        return instance;
     }
 
     @VisibleForTesting
@@ -61,12 +85,12 @@ public class MutationJournal
         journal = new Journal<>("MutationJournal", directory, params, new MutationIdSupport(), new MutationSerializer(), SegmentCompactor.noop());
     }
 
-    public void start()
+    void startInternal()
     {
         journal.start();
     }
 
-    public void shutdownBlocking()
+    void shutdownBlocking()
     {
         journal.shutdown();
     }
