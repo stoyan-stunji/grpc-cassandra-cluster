@@ -20,6 +20,7 @@ package org.apache.cassandra.auth;
 
 import java.util.List;
 
+import com.google.common.annotations.VisibleForTesting;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -37,6 +38,16 @@ public final class AuthConfig
     private static final Logger logger = LoggerFactory.getLogger(AuthConfig.class);
 
     private static boolean initialized;
+
+    /**
+     * Resets the initialized flag, enabling AuthConfig to be reconfigured multiple times within a single
+     * test case.
+     */
+    @VisibleForTesting
+    static void reset()
+    {
+        initialized = false;
+    }
 
     public static void applyAuth()
     {
