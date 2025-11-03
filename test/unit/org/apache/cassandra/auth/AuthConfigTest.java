@@ -182,8 +182,6 @@ public class AuthConfigTest
     private void safeUnregisterMbean(String mbeanName)
     {
         if (MBeanWrapper.instance.isRegistered(mbeanName))
-        {
             MBeanWrapper.instance.unregisterMBean(mbeanName);
-        }
     }
 }
