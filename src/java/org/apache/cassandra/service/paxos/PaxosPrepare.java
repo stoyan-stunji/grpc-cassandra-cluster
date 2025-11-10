@@ -1216,11 +1216,24 @@ public class PaxosPrepare extends PaxosRequestCallback<PaxosPrepare.Response> im
             {
                 Future<Response> response = execute(message.payload, new RequestTime(message.createdAtNanos()));
                 if (response == null)
+                {
                     MessagingService.instance().respondWithFailure(UNKNOWN, message);
+                }
                 else if (response.isDone())
+                {
                     // TODO This will probably require exception unwrapping to get the correct error handling up to the message handler
                     // This also runs on the mutation stage and is waiting on distributed things which is sus
                     MessagingService.instance().respond(getUnchecked(response), message);
+                }
+                else
+                {
+                    response.addCallback((success, failure) -> {
+                        if (failure != null)
+                            MessagingService.instance().respondWithFailure(RequestFailure.forException(failure), message);
+                        else
+                            MessagingService.instance().respond(success, message);
+                    });
+                }
             }
             catch (RetryOnDifferentSystemException e)
             {

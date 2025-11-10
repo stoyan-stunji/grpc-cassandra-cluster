@@ -47,6 +47,9 @@ import static org.apache.cassandra.distributed.test.tracking.MutationTrackingUti
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
+/**
+ * Establish that a coordinator for CAS is forwarding commit to a replica coordinator
+ */
 public class MutationTrackingCasForwardingTest extends TestBaseImpl
 {
     private static final Logger logger = LoggerFactory.getLogger(MutationTrackingCasForwardingTest.class);
