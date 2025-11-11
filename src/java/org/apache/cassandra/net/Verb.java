@@ -19,7 +19,9 @@ package org.apache.cassandra.net;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.TreeSet;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 import java.util.function.ToLongFunction;
@@ -225,12 +227,8 @@ public enum Verb
     PAXOS_PROPOSE_REQ      (34,  P2, writeTimeout,    MUTATION,          () -> Commit.serializer,                    () -> ProposeVerbHandler.instance,         PAXOS_PROPOSE_RSP   ),
     PAXOS_COMMIT_RSP       (95,  P2, writeTimeout,    REQUEST_RESPONSE,  () -> NoPayload.serializer,                 RESPONSE_HANDLER                             ),
     PAXOS_COMMIT_REQ       (35,  P2, writeTimeout,    MUTATION,          () -> Agreed.serializer,                    () -> PaxosCommit.requestHandler,          PAXOS_COMMIT_RSP    ),
-
-    PAXOS_COMMIT_FORWARD_RSP (920, P2, writeTimeout,  REQUEST_RESPONSE,  () -> NoPayload.serializer,                 RESPONSE_HANDLER                             ),
-    PAXOS_COMMIT_FORWARD_REQ (36,  P2, writeTimeout,  MUTATION,          () -> PaxosCommitForwardRequest.serializer, () -> PaxosCommitForwardHandler.instance,  PAXOS_COMMIT_FORWARD_RSP ),
-
-    PAXOS2_COMMIT_FORWARD_RSP (921, P2, writeTimeout, REQUEST_RESPONSE,  () -> NoPayload.serializer,                 RESPONSE_HANDLER                             ),
-    PAXOS2_COMMIT_FORWARD_REQ (68,  P2, writeTimeout, MUTATION,          () -> Paxos2CommitForwardRequest.serializer, () -> Paxos2CommitForwardHandler.instance, PAXOS2_COMMIT_FORWARD_RSP ),
+    PAXOS_COMMIT_FORWARD_RSP (96, P2, writeTimeout,  REQUEST_RESPONSE,  () -> NoPayload.serializer,                 RESPONSE_HANDLER                             ),
+    PAXOS_COMMIT_FORWARD_REQ (32,  P2, writeTimeout,  MUTATION,          () -> PaxosCommitForwardRequest.serializer, () -> PaxosCommitForwardHandler.instance,  PAXOS_COMMIT_FORWARD_RSP ),
 
     TRUNCATE_RSP           (79,  P0, truncateTimeout, REQUEST_RESPONSE,  () -> TruncateResponse.serializer,          RESPONSE_HANDLER                             ),
     TRUNCATE_REQ           (19,  P0, truncateTimeout, MUTATION,          () -> TruncateRequest.serializer,           () -> TruncateVerbHandler.instance,        TRUNCATE_RSP        ),
@@ -312,6 +310,8 @@ public enum Verb
     PAXOS2_CLEANUP_COMPLETE_REQ      (48, P2, repairTimeout, PAXOS_REPAIR,      () -> PaxosCleanupComplete.serializer,         () -> PaxosCleanupComplete.verbHandler,                      PAXOS2_CLEANUP_COMPLETE_RSP      ),
     PAXOS2_UPDATE_LOW_BALLOT_RSP     (67, P2, repairTimeout, PAXOS_REPAIR,      () -> NoPayload.serializer,                    RESPONSE_HANDLER                                                            ),
     PAXOS2_UPDATE_LOW_BALLOT_REQ     (64, P2, repairTimeout, PAXOS_REPAIR,      () -> PaxosUpdateLowBallot.serializer,         () -> PaxosUpdateLowBallot.verbHandler,                      PAXOS2_UPDATE_LOW_BALLOT_RSP     ),
+    PAXOS2_COMMIT_FORWARD_RSP (71, P2, writeTimeout, REQUEST_RESPONSE,  () -> NoPayload.serializer,                 RESPONSE_HANDLER                             ),
+    PAXOS2_COMMIT_FORWARD_REQ (72,  P2, writeTimeout, MUTATION,          () -> Paxos2CommitForwardRequest.serializer, () -> Paxos2CommitForwardHandler.instance, PAXOS2_COMMIT_FORWARD_RSP ),
 
     // transactional cluster metadata
     TCM_COMMIT_RSP         (801, P0, rpcTimeout,      INTERNAL_METADATA,    MessageSerializers::commitResultSerializer,         RESPONSE_HANDLER                                 ),
