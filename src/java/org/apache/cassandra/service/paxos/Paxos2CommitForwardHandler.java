@@ -18,19 +18,14 @@
 
 package org.apache.cassandra.service.paxos;
 
-import java.util.ArrayList;
-import java.util.List;
 import java.util.function.Consumer;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.Mutation;
 import org.apache.cassandra.dht.Token;
-import org.apache.cassandra.locator.EndpointsForToken;
-import org.apache.cassandra.locator.InetAddressAndPort;
-import org.apache.cassandra.locator.Replica;
+import org.apache.cassandra.exceptions.RequestFailureReason;
 import org.apache.cassandra.net.IVerbHandler;
 import org.apache.cassandra.net.Message;
 import org.apache.cassandra.net.MessagingService;
@@ -40,7 +35,7 @@ import org.apache.cassandra.replication.MutationTrackingService;
 import org.apache.cassandra.schema.KeyspaceMetadata;
 import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.tracing.Tracing;
-import org.apache.cassandra.utils.FBUtilities;
+import org.apache.cassandra.utils.Clock;
 import org.apache.cassandra.utils.concurrent.ConditionAsConsumer;
 
 import static org.apache.cassandra.utils.concurrent.ConditionAsConsumer.newConditionAsConsumer;
@@ -105,7 +100,8 @@ public class Paxos2CommitForwardHandler implements IVerbHandler<Paxos2CommitForw
             // Wait for completion
             try
             {
-                onDone.awaitUntil(System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(30));
+                // TODO: Need to wait proper amount of time for this verb
+                onDone.awaitUntil(Clock.Global.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(30));
                 PaxosCommit.Status status = statusHolder[0];
                 
                 if (status != null && status.isSuccess())
@@ -129,7 +125,7 @@ public class Paxos2CommitForwardHandler implements IVerbHandler<Paxos2CommitForw
         catch (Exception e)
         {
             logger.error("Failed to execute forwarded Paxos V2 commit for {}", request.commit, e);
-            MessagingService.instance().respondWithFailure(org.apache.cassandra.exceptions.RequestFailureReason.UNKNOWN, message);
+            MessagingService.instance().respondWithFailure(RequestFailureReason.TIMEOUT, message);
         }
     }
 }
