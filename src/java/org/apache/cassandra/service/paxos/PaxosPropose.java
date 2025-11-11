@@ -173,7 +173,7 @@ public class PaxosPropose<OnDone extends Consumer<? super PaxosPropose.Status>> 
      */
     static Paxos.Async<Status> propose(Proposal proposal, Paxos.Participants participants, boolean waitForNoSideEffect)
     {
-        if (waitForNoSideEffect && proposal.getPartitionUpdate().isEmpty())
+        if (waitForNoSideEffect && proposal.isEmpty())
             waitForNoSideEffect = false; // by definition this has no "side effects" (besides linearizing the operation)
 
         // to avoid unnecessary object allocations we extend PaxosPropose to implements Paxos.Async
@@ -207,7 +207,7 @@ public class PaxosPropose<OnDone extends Consumer<? super PaxosPropose.Status>> 
 
     static <T extends Consumer<Status>> T propose(Proposal proposal, Paxos.Participants participants, boolean waitForNoSideEffect, T onDone)
     {
-        if (waitForNoSideEffect && proposal.getPartitionUpdate().isEmpty())
+        if (waitForNoSideEffect && proposal.isEmpty())
             waitForNoSideEffect = false; // by definition this has no "side effects" (besides linearizing the operation)
 
         PaxosPropose<?> propose = new PaxosPropose<>(proposal, participants.sizeOfPoll(), participants.sizeOfConsensusQuorum, waitForNoSideEffect, onDone);
@@ -427,7 +427,7 @@ public class PaxosPropose<OnDone extends Consumer<? super PaxosPropose.Status>> 
 
         public static AcceptResult execute(Proposal proposal)
         {
-            if (!Paxos.isInRangeAndShouldProcess(proposal.getPartitionUpdate().partitionKey(), proposal.getPartitionUpdate().metadata(), false))
+            if (!Paxos.isInRangeAndShouldProcess(proposal.partitionKey(), proposal.metadata(), false))
                 return null;
 
             long start = nanoTime();
@@ -437,7 +437,7 @@ public class PaxosPropose<OnDone extends Consumer<? super PaxosPropose.Status>> 
             }
             finally
             {
-                Keyspace.openAndGetStore(proposal.getPartitionUpdate().metadata()).metric.casPropose.addNano(nanoTime() - start);
+                Keyspace.openAndGetStore(proposal.metadata()).metric.casPropose.addNano(nanoTime() - start);
             }
         }
     }

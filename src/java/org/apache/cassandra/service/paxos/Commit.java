@@ -23,6 +23,7 @@ package org.apache.cassandra.service.paxos;
 
 import java.io.IOException;
 import java.util.function.BiFunction;
+import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 
 import com.google.common.base.Objects;
@@ -35,6 +36,7 @@ import org.apache.cassandra.db.Mutation;
 import org.apache.cassandra.db.ReadCommand.PotentialTxnConflicts;
 import org.apache.cassandra.db.partitions.PartitionUpdate;
 import org.apache.cassandra.db.rows.DeserializationHelper;
+import org.apache.cassandra.db.rows.EncodingStats;
 import org.apache.cassandra.io.IVersionedSerializer;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
@@ -153,7 +155,7 @@ public class Commit
     {
         public static AcceptedWithTTL withDefaultTTL(Commit copy)
         {
-            return new AcceptedWithTTL(copy, nowInSeconds() + legacyPaxosTtlSec(copy.getPartitionUpdate().metadata()));
+            return new AcceptedWithTTL(copy, nowInSeconds() + legacyPaxosTtlSec(copy.metadata()));
         }
 
         public final long localDeletionTime;
@@ -242,7 +244,7 @@ public class Commit
 
         public boolean isNone()
         {
-            return ballot.equals(Ballot.none()) && getPartitionUpdate().isEmpty();
+            return ballot.equals(Ballot.none()) && update.isEmpty();
         }
     }
 
@@ -250,7 +252,7 @@ public class Commit
     {
         public static CommittedWithTTL withDefaultTTL(Commit copy)
         {
-            return new CommittedWithTTL(copy, nowInSeconds() + legacyPaxosTtlSec(copy.getPartitionUpdate().metadata()));
+            return new CommittedWithTTL(copy, nowInSeconds() + legacyPaxosTtlSec(copy.metadata()));
         }
 
         public final long localDeletionTime;
@@ -281,6 +283,7 @@ public class Commit
 
     public final Ballot ballot;
     public final Mutation mutation;
+    public final PartitionUpdate update;
 
     /**
      * Unwrapping a Mutation and using this constructor is a problem becaues it drops the mutation id
@@ -292,6 +295,7 @@ public class Commit
 
         this.ballot = ballot;
         this.mutation = new Mutation(MutationId.fixme(), update, PotentialTxnConflicts.ALLOW);
+        this.update = update;
     }
 
     public Commit(Ballot ballot, Mutation mutation)
@@ -302,6 +306,7 @@ public class Commit
 
         this.ballot = ballot;
         this.mutation = mutation;
+        this.update = mutation.getOnlyUpdate();
     }
 
     public static Commit newPrepare(DecoratedKey partitionKey, TableMetadata metadata, Ballot ballot)
@@ -363,13 +368,28 @@ public class Commit
             return mutation;
         
         // Create new mutation with the specified ID
-        PartitionUpdate update = mutation.getPartitionUpdates().iterator().next();
+        PartitionUpdate update = mutation.getOnlyUpdate();
         return new Mutation(mutationId, update, mutation.potentialTxnConflicts());
     }
 
-    public PartitionUpdate getPartitionUpdate()
+    public DecoratedKey partitionKey()
     {
-        return mutation.getPartitionUpdates().iterator().next();
+        return update.partitionKey();
+    }
+
+    public TableMetadata metadata()
+    {
+        return update.metadata();
+    }
+
+    public EncodingStats stats()
+    {
+        return update.stats();
+    }
+
+    public boolean isEmpty()
+    {
+        return mutation.getOnlyUpdate().isEmpty();
     }
 
     @Override
@@ -380,13 +400,13 @@ public class Commit
 
         Commit commit = (Commit) o;
 
-        return ballot.equals(commit.ballot) && getPartitionUpdate().equals(commit.getPartitionUpdate());
+        return ballot.equals(commit.ballot) && update.equals(commit.update);
     }
 
     @Override
     public int hashCode()
     {
-        return Objects.hashCode(ballot, getPartitionUpdate());
+        return Objects.hashCode(ballot, update);
     }
 
     @Override
@@ -397,7 +417,6 @@ public class Commit
 
     public String toString(String kind)
     {
-        PartitionUpdate update = getPartitionUpdate();
         return String.format("%s(%d:%s, %d:%s)", kind, ballot.uuidTimestamp(), ballot, update.stats().minTimestamp, update.toString(false));
     }
 
@@ -422,7 +441,7 @@ public class Commit
 
         // the timestamp of a mutation stays unchanged as we repropose it, so the timestamp of the mutation
         // is the timestamp of the ballot that originally proposed it
-        long originalBallotOfNewer = newer.getPartitionUpdate().stats().minTimestamp;
+        long originalBallotOfNewer = newer.stats().minTimestamp;
 
         // so, if the mutation and ballot timestamps match, this is not a reproposal but a first proposal
         if (ballotOfNewer == originalBallotOfNewer)
@@ -433,7 +452,7 @@ public class Commit
             return true;
 
         // otherwise, it could be that both are reproposals, so just check both for the "original" ballot timestamp
-        return originalBallotOfNewer == older.getPartitionUpdate().stats().minTimestamp;
+        return originalBallotOfNewer == older.stats().minTimestamp;
     }
 
     public CompareResult compareWith(Commit that)
@@ -555,7 +574,7 @@ public class Commit
             else
             {
                 // Legacy format: serialize PartitionUpdate
-                PartitionUpdate.serializer.serialize(commit.getPartitionUpdate(), out, version);
+                PartitionUpdate.serializer.serialize(commit.update, out, version);
             }
         }
 
@@ -587,7 +606,7 @@ public class Commit
             }
             else
             {
-                size += PartitionUpdate.serializer.serializedSize(commit.getPartitionUpdate(), version);
+                size += PartitionUpdate.serializer.serializedSize(commit.update, version);
             }
             
             return size;

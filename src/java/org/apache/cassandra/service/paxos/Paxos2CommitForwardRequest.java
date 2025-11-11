@@ -31,6 +31,7 @@ import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.locator.EndpointsForToken;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.locator.Replica;
+import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.service.paxos.Commit.Agreed;
 
 import static org.apache.cassandra.dht.AbstractBounds.tokenSerializer;
@@ -100,9 +101,10 @@ public class Paxos2CommitForwardRequest
             ConsistencyLevel consistencyForCommit = ConsistencyLevel.fromCode(in.readUnsignedByte());
             
             // Deserialize EndpointsForToken collections using partitioner from commit
-            EndpointsForToken all = deserializeEndpoints(in, version, commit.getPartitionUpdate().metadata().partitioner);
-            EndpointsForToken allLive = deserializeEndpoints(in, version, commit.getPartitionUpdate().metadata().partitioner);
-            EndpointsForToken allDown = deserializeEndpoints(in, version, commit.getPartitionUpdate().metadata().partitioner);
+            IPartitioner partitioner = commit.metadata().partitioner;
+            EndpointsForToken all = deserializeEndpoints(in, version, partitioner);
+            EndpointsForToken allLive = deserializeEndpoints(in, version, partitioner);
+            EndpointsForToken allDown = deserializeEndpoints(in, version, partitioner);
             
             int required = in.readInt();
             boolean isUrgent = in.readBoolean();

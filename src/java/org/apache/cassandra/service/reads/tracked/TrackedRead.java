@@ -62,8 +62,8 @@ import org.apache.cassandra.utils.concurrent.ImmediateFuture;
 import org.apache.cassandra.utils.concurrent.UncheckedInterruptedException;
 
 import static java.util.concurrent.TimeUnit.NANOSECONDS;
-import static org.apache.cassandra.db.ISinglePartitionReadCommand.Kind.TRACKED_DATA_READ;
-import static org.apache.cassandra.db.ISinglePartitionReadCommand.Kind.TRACKED_SUMMARY_READ;
+import static org.apache.cassandra.db.EmbeddableSinglePartitionReadCommand.Kind.TRACKED_DATA_READ;
+import static org.apache.cassandra.db.EmbeddableSinglePartitionReadCommand.Kind.TRACKED_SUMMARY_READ;
 import static org.apache.cassandra.metrics.ClientRequestsMetricsHolder.readMetrics;
 
 public abstract class TrackedRead<E extends Endpoints<E>, P extends ReplicaPlan.ForRead<E, P>> implements RequestCallback<TrackedDataResponse>
@@ -424,7 +424,7 @@ public abstract class TrackedRead<E extends Endpoints<E>, P extends ReplicaPlan.
         };
     }
 
-    public abstract static class Request implements ISinglePartitionReadCommand
+    public abstract static class Request implements EmbeddableSinglePartitionReadCommand
     {
         public final Id readId;
         public final ReadCommand command;
@@ -541,7 +541,7 @@ public abstract class TrackedRead<E extends Endpoints<E>, P extends ReplicaPlan.
         }
     }
 
-    public static class SummaryRequest extends Request implements ISinglePartitionReadCommand
+    public static class SummaryRequest extends Request implements EmbeddableSinglePartitionReadCommand
     {
         public SummaryRequest(Id readId, ReadCommand command, int dataNode, int[] summaryNodes)
         {

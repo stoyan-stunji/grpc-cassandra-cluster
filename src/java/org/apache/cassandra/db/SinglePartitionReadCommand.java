@@ -87,12 +87,12 @@ import org.apache.cassandra.transport.Dispatcher;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.btree.BTreeSet;
 
-import static org.apache.cassandra.db.ISinglePartitionReadCommand.Kind.UNTRACKED;
+import static org.apache.cassandra.db.EmbeddableSinglePartitionReadCommand.Kind.UNTRACKED;
 
 /**
  * A read command that selects a (part of a) single partition.
  */
-public class SinglePartitionReadCommand extends ReadCommand implements SinglePartitionReadQuery, ISinglePartitionReadCommand
+public class SinglePartitionReadCommand extends ReadCommand implements SinglePartitionReadQuery, EmbeddableSinglePartitionReadCommand
 {
     protected static final SelectionDeserializer selectionDeserializer = new Deserializer();
     protected static final Function<Seekable, SelectionDeserializer> accordSelectionDeserializer = AccordDeserializer::new;
@@ -1327,7 +1327,7 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
     }
 
     @Override
-    public ISinglePartitionReadCommand.Kind kind()
+    public EmbeddableSinglePartitionReadCommand.Kind kind()
     {
         return UNTRACKED;
     }

@@ -55,19 +55,19 @@ public class Paxos2CommitForwardHandler implements IVerbHandler<Paxos2CommitForw
     {
         Paxos2CommitForwardRequest request = message.payload;
         
-        Tracing.trace("Executing forwarded Paxos V2 commit for {}", request.commit.getPartitionUpdate().partitionKey());
+        Tracing.trace("Executing forwarded Paxos V2 commit for {}", request.commit.partitionKey());
 
         try
         {
             Commit.Agreed commitToExecute = request.commit;
             
             // Generate proper mutation ID for tracked keyspaces
-            String keyspaceName = request.commit.getPartitionUpdate().metadata().keyspace;
+            String keyspaceName = request.commit.metadata().keyspace;
             KeyspaceMetadata ksMetadata = Schema.instance.getKeyspaceMetadata(keyspaceName);
             
             if (ksMetadata != null && ksMetadata.params.replicationType.isTracked())
             {
-                Token token = request.commit.getPartitionUpdate().partitionKey().getToken();
+                Token token = request.commit.partitionKey().getToken();
                 MutationId mutationId = MutationTrackingService.instance.nextMutationId(keyspaceName, token);
                 
                 // Create commit with proper mutation ID

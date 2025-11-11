@@ -834,7 +834,7 @@ public class Paxos
                         // no need to commit a no-op; either it
                         //   1) reached a majority, in which case it was agreed, had no effect and we can do nothing; or
                         //   2) did not reach a majority, was not agreed, and was not user visible as a result so we can ignore it
-                        if (!proposal.getPartitionUpdate().isEmpty())
+                        if (!proposal.isEmpty())
                             commit = commit(proposal.agreed(), participants, consistencyForConsensus, consistencyForCommit, true);
 
                         break done;
@@ -1099,7 +1099,7 @@ public class Paxos
                     // is equal to the latest commit (even if the ballots aren't) we're done and can abort earlier,
                     // and in fact it's possible for a CAS to sometimes determine if side effects occurred by reading
                     // the underlying data and not witnessing the timestamp of its ballot (or any newer for the relevant data).
-                    Proposal repropose = new Proposal(inProgress.ballot, inProgress.accepted.getPartitionUpdate());
+                    Proposal repropose = new Proposal(inProgress.ballot, inProgress.accepted.update);
                     PaxosPropose.Status proposeResult = propose(repropose, inProgress.participants, false).awaitUntil(deadline);
                     switch (proposeResult.outcome)
                     {

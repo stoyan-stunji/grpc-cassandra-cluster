@@ -22,7 +22,7 @@ import java.io.IOException;
 
 import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.db.DecoratedKey;
-import org.apache.cassandra.db.ISinglePartitionReadCommand;
+import org.apache.cassandra.db.EmbeddableSinglePartitionReadCommand;
 import org.apache.cassandra.db.SinglePartitionReadCommand;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
@@ -72,7 +72,7 @@ public class PaxosCommitAndPrepare
     {
         final Agreed commit;
 
-        Request(Agreed commit, Ballot ballot, Paxos.Electorate electorate, ISinglePartitionReadCommand read, boolean isWrite, boolean isForRecovery)
+        Request(Agreed commit, Ballot ballot, Paxos.Electorate electorate, EmbeddableSinglePartitionReadCommand read, boolean isWrite, boolean isForRecovery)
         {
             super(ballot, electorate, read, isWrite, isForRecovery);
             this.commit = commit;
@@ -109,7 +109,7 @@ public class PaxosCommitAndPrepare
 
     public static class RequestSerializer extends PaxosPrepare.AbstractRequestSerializer<Request, Agreed>
     {
-        Request construct(Agreed param, Ballot ballot, Paxos.Electorate electorate, ISinglePartitionReadCommand read, boolean isWrite, boolean isForRecovery)
+        Request construct(Agreed param, Ballot ballot, Paxos.Electorate electorate, EmbeddableSinglePartitionReadCommand read, boolean isWrite, boolean isForRecovery)
         {
             return new Request(param, ballot, electorate, read, isWrite, isForRecovery);
         }
@@ -159,12 +159,12 @@ public class PaxosCommitAndPrepare
         private static Future<PaxosPrepare.Response> execute(Request request, RequestTime requestTime)
         {
             Agreed commit = request.commit;
-            if (!Paxos.isInRangeAndShouldProcess(commit.getPartitionUpdate().partitionKey(), commit.getPartitionUpdate().metadata(), request.read != null))
+            if (!Paxos.isInRangeAndShouldProcess(commit.partitionKey(), commit.metadata(), request.read != null))
                 return null;
 
             // This can be done outside the lock
             ClusterMetadata cm = ClusterMetadata.current();
-            KeyMigrationState keyMigrationState = getKeyMigrationState(cm, commit.getPartitionUpdate().metadata().id, commit.getPartitionUpdate().partitionKey());
+            KeyMigrationState keyMigrationState = getKeyMigrationState(cm, commit.metadata().id, commit.partitionKey());
             // Make sure the operation is safe and there is no Accord state that needs application
             // Also need to know max HLC in order to accept this ballot
             long maxHLC = keyMigrationState.maybePerformAccordToPaxosKeyMigration(true);

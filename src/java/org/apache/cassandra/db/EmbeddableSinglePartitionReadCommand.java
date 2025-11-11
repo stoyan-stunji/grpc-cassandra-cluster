@@ -30,9 +30,15 @@ import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.service.reads.tracked.TrackedRead.DataRequest;
 import org.apache.cassandra.service.reads.tracked.TrackedRead.SummaryRequest;
 
-import static org.apache.cassandra.db.ISinglePartitionReadCommand.Kind.UNTRACKED;
+import static org.apache.cassandra.db.EmbeddableSinglePartitionReadCommand.Kind.UNTRACKED;
 
-public interface ISinglePartitionReadCommand
+/**
+ * Interface for read command that allows it be serialized and embedded in another message. Used in Paxos
+ * to provide a common base class to serialize for tracked and untracked reads. Tracked reads contain
+ * additional information needed to execute the read beyond the read command itself so an additional interface
+ * is needed.
+ */
+public interface EmbeddableSinglePartitionReadCommand
 {
     enum Kind
     {
@@ -102,10 +108,10 @@ public interface ISinglePartitionReadCommand
 
     DecoratedKey partitionKey();
 
-    IVersionedSerializer<ISinglePartitionReadCommand> serializer = new IVersionedSerializer<>()
+    IVersionedSerializer<EmbeddableSinglePartitionReadCommand> serializer = new IVersionedSerializer<>()
     {
         @Override
-        public void serialize(ISinglePartitionReadCommand command, DataOutputPlus out, int version) throws IOException
+        public void serialize(EmbeddableSinglePartitionReadCommand command, DataOutputPlus out, int version) throws IOException
         {
             if (version >= MessagingService.VERSION_52)
                 Kind.serializer.serialize(command.kind(), out, version);
@@ -129,10 +135,10 @@ public interface ISinglePartitionReadCommand
         }
 
         @Override
-        public ISinglePartitionReadCommand deserialize(DataInputPlus in, int version) throws IOException
+        public EmbeddableSinglePartitionReadCommand deserialize(DataInputPlus in, int version) throws IOException
         {
 
-            Kind kind = version >= MessagingService.VERSION_52 ? ISinglePartitionReadCommand.Kind.serializer.deserialize(in, version) : UNTRACKED;
+            Kind kind = version >= MessagingService.VERSION_52 ? EmbeddableSinglePartitionReadCommand.Kind.serializer.deserialize(in, version) : UNTRACKED;
             switch (kind)
             {
                 case UNTRACKED:
@@ -147,7 +153,7 @@ public interface ISinglePartitionReadCommand
         }
 
         @Override
-        public long serializedSize(ISinglePartitionReadCommand command, int version)
+        public long serializedSize(EmbeddableSinglePartitionReadCommand command, int version)
         {
             long size = 0;
             if (version >= MessagingService.VERSION_52)

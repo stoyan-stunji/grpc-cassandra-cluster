@@ -38,7 +38,7 @@ import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.IReadResponse;
-import org.apache.cassandra.db.ISinglePartitionReadCommand;
+import org.apache.cassandra.db.EmbeddableSinglePartitionReadCommand;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.ReadExecutionController;
 import org.apache.cassandra.db.ReadResponse;
@@ -84,7 +84,7 @@ import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.util.concurrent.Futures.getUnchecked;
 import static java.util.Collections.emptyMap;
 import static org.apache.cassandra.exceptions.RequestFailureReason.RETRY_ON_DIFFERENT_TRANSACTION_SYSTEM;
-import static org.apache.cassandra.db.ISinglePartitionReadCommand.Kind.TRACKED_DATA_READ;
+import static org.apache.cassandra.db.EmbeddableSinglePartitionReadCommand.Kind.TRACKED_DATA_READ;
 import static org.apache.cassandra.exceptions.RequestFailureReason.UNKNOWN;
 import static org.apache.cassandra.locator.InetAddressAndPort.Serializer.inetAddressAndPortSerializer;
 import static org.apache.cassandra.net.Verb.PAXOS2_PREPARE_REQ;
@@ -374,7 +374,7 @@ public class PaxosPrepare extends PaxosRequestCallback<PaxosPrepare.Response> im
         // no need to commit a no-op; either it
         //   1) reached a majority, in which case it was agreed, had no effect and we can do nothing; or
         //   2) did not reach a majority, was not agreed, and was not user visible as a result so we can ignore it
-        if (latestAccepted.getPartitionUpdate().isEmpty())
+        if (latestAccepted.isEmpty())
             return false;
 
         // If we aren't newer than latestCommitted, then we're done
@@ -388,17 +388,17 @@ public class PaxosPrepare extends PaxosRequestCallback<PaxosPrepare.Response> im
         return !latestAccepted.isReproposalOf(latestCommitted);
     }
 
-    static PaxosPrepare prepare(Participants participants, ISinglePartitionReadCommand readCommand, boolean isWrite, boolean acceptEarlyReadPermission) throws UnavailableException
+    static PaxosPrepare prepare(Participants participants, EmbeddableSinglePartitionReadCommand readCommand, boolean isWrite, boolean acceptEarlyReadPermission) throws UnavailableException
     {
         return prepare(null, participants, readCommand, isWrite, acceptEarlyReadPermission);
     }
 
-    static PaxosPrepare prepare(Ballot minimumBallot, Participants participants, ISinglePartitionReadCommand readCommand, boolean isWrite, boolean acceptEarlyReadPermission) throws UnavailableException
+    static PaxosPrepare prepare(Ballot minimumBallot, Participants participants, EmbeddableSinglePartitionReadCommand readCommand, boolean isWrite, boolean acceptEarlyReadPermission) throws UnavailableException
     {
         return prepareWithBallot(newBallot(minimumBallot, participants.consistencyForConsensus), participants, readCommand, isWrite, acceptEarlyReadPermission);
     }
 
-    static PaxosPrepare prepareWithBallot(Ballot ballot, Participants participants, ISinglePartitionReadCommand readCommand, boolean isWrite, boolean acceptEarlyReadPermission)
+    static PaxosPrepare prepareWithBallot(Ballot ballot, Participants participants, EmbeddableSinglePartitionReadCommand readCommand, boolean isWrite, boolean acceptEarlyReadPermission)
     {
         Tracing.trace("Preparing {} with read", ballot);
         Request request = new Request(ballot, participants.electorate, readCommand, isWrite, false);
@@ -853,7 +853,7 @@ public class PaxosPrepare extends PaxosRequestCallback<PaxosPrepare.Response> im
         // or in the case that we have an empty proposal accepted, since that will not be committed
         // in theory in this case we could now restart refreshStaleParticipants, but this would
         // unnecessarily complicate the logic so instead we accept that we will unnecessarily re-propose
-        if (latestAccepted != null && latestAccepted.getPartitionUpdate().isEmpty() && latestAccepted.isAfter(permitted.latestCommitted))
+        if (latestAccepted != null && latestAccepted.isEmpty() && latestAccepted.isAfter(permitted.latestCommitted))
             return false;
 
         // or in the case that both are older than the most recent repair low bound), in which case a topology change
@@ -881,7 +881,7 @@ public class PaxosPrepare extends PaxosRequestCallback<PaxosPrepare.Response> im
             }
         }
 
-        long gcGraceMicros = TimeUnit.SECONDS.toMicros(permitted.latestCommitted.getPartitionUpdate().metadata().params.gcGraceSeconds);
+        long gcGraceMicros = TimeUnit.SECONDS.toMicros(permitted.latestCommitted.metadata().params.gcGraceSeconds);
         // paxos repair uses stale ballots, so comparing against request.ballot time will not completely prevent false
         // positives, since compaction may have removed paxos metadata on some nodes and not others. It's also possible
         // clock skew has placed the ballot to repair in the future, so we use now or the ballot, whichever is higher.
@@ -1056,13 +1056,13 @@ public class PaxosPrepare extends PaxosRequestCallback<PaxosPrepare.Response> im
     {
         final Ballot ballot;
         final Electorate electorate;
-        final ISinglePartitionReadCommand read;
+        final EmbeddableSinglePartitionReadCommand read;
         final boolean isForWrite;
         final DecoratedKey partitionKey;
         final TableMetadata table;
         final boolean isForRecovery;
 
-        AbstractRequest(Ballot ballot, Electorate electorate, ISinglePartitionReadCommand read, boolean isForWrite, boolean isForRecovery)
+        AbstractRequest(Ballot ballot, Electorate electorate, EmbeddableSinglePartitionReadCommand read, boolean isForWrite, boolean isForRecovery)
         {
             this.ballot = ballot;
             this.electorate = electorate;
@@ -1098,7 +1098,7 @@ public class PaxosPrepare extends PaxosRequestCallback<PaxosPrepare.Response> im
 
     static class Request extends AbstractRequest<Request>
     {
-        Request(Ballot ballot, Electorate electorate, ISinglePartitionReadCommand read, boolean isWrite, boolean isForRecovery)
+        Request(Ballot ballot, Electorate electorate, EmbeddableSinglePartitionReadCommand read, boolean isWrite, boolean isForRecovery)
         {
             super(ballot, electorate, read, isWrite, isForRecovery);
         }
@@ -1306,7 +1306,7 @@ public class PaxosPrepare extends PaxosRequestCallback<PaxosPrepare.Response> im
 
                     Ballot mostRecentCommit = result.before.accepted != null
                                               && result.before.accepted.ballot.compareTo(result.before.committed.ballot) > 0
-                                              && result.before.accepted.getPartitionUpdate().isEmpty()
+                                              && result.before.accepted.isEmpty()
                                               ? result.before.accepted.ballot : result.before.committed.ballot;
 
                     boolean hasProposalStability = mostRecentCommit.equals(result.before.promisedWrite)
@@ -1380,7 +1380,7 @@ public class PaxosPrepare extends PaxosRequestCallback<PaxosPrepare.Response> im
 
     static abstract class AbstractRequestSerializer<R extends AbstractRequest<R>, T> implements IVersionedSerializer<R>
     {
-        abstract R construct(T param, Ballot ballot, Electorate electorate, ISinglePartitionReadCommand read, boolean isWrite, boolean isForRecovery);
+        abstract R construct(T param, Ballot ballot, Electorate electorate, EmbeddableSinglePartitionReadCommand read, boolean isWrite, boolean isForRecovery);
         abstract R construct(T param, Ballot ballot, Electorate electorate, DecoratedKey partitionKey, TableMetadata table, boolean isWrite, boolean isForRecovery);
 
         @Override
@@ -1392,7 +1392,7 @@ public class PaxosPrepare extends PaxosRequestCallback<PaxosPrepare.Response> im
             if (request.read != null)
             {
 
-               ISinglePartitionReadCommand.serializer.serialize(request.read, out, version);
+               EmbeddableSinglePartitionReadCommand.serializer.serialize(request.read, out, version);
             }
             else
             {
@@ -1410,7 +1410,7 @@ public class PaxosPrepare extends PaxosRequestCallback<PaxosPrepare.Response> im
             byte flag = in.readByte();
             if ((flag & 1) != 0)
             {
-                ISinglePartitionReadCommand readCommand = ISinglePartitionReadCommand.serializer.deserialize(in, version);
+                EmbeddableSinglePartitionReadCommand readCommand = EmbeddableSinglePartitionReadCommand.serializer.deserialize(in, version);
                 boolean isForRecovery = false;
                 if (version >= MessagingService.VERSION_51)
                     isForRecovery = in.readBoolean();
@@ -1433,7 +1433,7 @@ public class PaxosPrepare extends PaxosRequestCallback<PaxosPrepare.Response> im
             long size = Ballot.sizeInBytes()
                    + Electorate.serializer.serializedSize(request.electorate, version)
                    + 1 + (request.read != null
-                        ? ISinglePartitionReadCommand.serializer.serializedSize(request.read, version)
+                        ? EmbeddableSinglePartitionReadCommand.serializer.serializedSize(request.read, version)
                         : request.table.id.serializedSize()
                             + DecoratedKey.serializer.serializedSize(request.partitionKey, version));
             if (version >= MessagingService.VERSION_51)
@@ -1444,7 +1444,7 @@ public class PaxosPrepare extends PaxosRequestCallback<PaxosPrepare.Response> im
 
     public static class RequestSerializer extends AbstractRequestSerializer<Request, Object>
     {
-        Request construct(Object ignore, Ballot ballot, Electorate electorate, ISinglePartitionReadCommand read, boolean isWrite, boolean isForRecovery)
+        Request construct(Object ignore, Ballot ballot, Electorate electorate, EmbeddableSinglePartitionReadCommand read, boolean isWrite, boolean isForRecovery)
         {
             return new Request(ballot, electorate, read, isWrite, isForRecovery);
         }

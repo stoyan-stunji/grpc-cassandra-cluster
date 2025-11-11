@@ -124,7 +124,7 @@ public class PaxosCommit<OnDone extends Consumer<? super PaxosCommit.Status>> ex
     public PaxosCommit(Agreed commit, boolean allowHints, ConsistencyLevel consistencyForConsensus, ConsistencyLevel consistencyForCommit, EndpointsForToken replicas, int required, OnDone onDone)
     {
         // Check if this is a tracked keyspace and generate mutation ID if needed
-        String keyspaceName = commit.getPartitionUpdate().metadata().keyspace;
+        String keyspaceName = commit.metadata().keyspace;
         KeyspaceMetadata ksMetadata = Schema.instance.getKeyspaceMetadata(keyspaceName);
         boolean isTracked = ksMetadata != null && ksMetadata.params.replicationType.isTracked();
         
@@ -135,7 +135,7 @@ public class PaxosCommit<OnDone extends Consumer<? super PaxosCommit.Status>> ex
         if (isTracked)
         {
             // Generate mutation ID for tracked keyspace
-            org.apache.cassandra.dht.Token token = commit.getPartitionUpdate().partitionKey().getToken();
+            org.apache.cassandra.dht.Token token = commit.partitionKey().getToken();
             mutationId = MutationTrackingService.instance.nextMutationId(keyspaceName, token);
             
             // Create commit with proper mutation ID
@@ -438,7 +438,7 @@ public class PaxosCommit<OnDone extends Consumer<? super PaxosCommit.Status>> ex
 
         private static NoPayload execute(Agreed agreed)
         {
-            if (!Paxos.isInRangeAndShouldProcess(agreed.getPartitionUpdate().partitionKey(), agreed.getPartitionUpdate().metadata(), false))
+            if (!Paxos.isInRangeAndShouldProcess(agreed.partitionKey(), agreed.metadata(), false))
                 return null;
 
             PaxosState.commitDirect(agreed);
@@ -453,7 +453,7 @@ public class PaxosCommit<OnDone extends Consumer<? super PaxosCommit.Status>> ex
     private static boolean isTrackedKeyspaceRequiringForwarding(Agreed commit, EndpointsForToken all)
     {
         // Get keyspace metadata from the commit's table metadata
-        String keyspaceName = commit.getPartitionUpdate().metadata().keyspace;
+        String keyspaceName = commit.metadata().keyspace;
         org.apache.cassandra.schema.KeyspaceMetadata ksMetadata = org.apache.cassandra.schema.Schema.instance.getKeyspaceMetadata(keyspaceName);
         
         if (ksMetadata == null || !ksMetadata.params.replicationType.isTracked())

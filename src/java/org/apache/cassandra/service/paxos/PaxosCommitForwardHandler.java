@@ -48,7 +48,7 @@ public class PaxosCommitForwardHandler implements IVerbHandler<PaxosCommitForwar
         ClusterMetadataService.instance().fetchLogFromPeerOrCMS(message.from(), message.header.epoch);
         PaxosCommitForwardRequest request = message.payload;
         
-        Tracing.trace("Executing forwarded Paxos commit for {}", request.proposal.getPartitionUpdate().partitionKey());
+        Tracing.trace("Executing forwarded Paxos commit for {}", request.proposal.partitionKey());
 
         try
         {

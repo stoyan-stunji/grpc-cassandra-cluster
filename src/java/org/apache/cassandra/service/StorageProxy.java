@@ -625,7 +625,7 @@ private static ConsensusAttemptResult legacyCas(TableMetadata metadata,
                     // because we also skip replaying those same empty update in beginAndRepairPaxos (see the longer
                     // comment there). As empty update are somewhat common (serial reads and non-applying CAS propose
                     // them), this is worth bothering.
-                    if (!proposal.getPartitionUpdate().isEmpty())
+                    if (!proposal.isEmpty())
                         commitPaxos(proposal, consistencyForCommit, true, requestTime);
                     RowIterator result = proposalPair.right;
                     if (result != null)
@@ -730,11 +730,11 @@ private static ConsensusAttemptResult legacyCas(TableMetadata metadata,
                 //     replayed in that case.
                 // Tl;dr, it is safe to skip committing empty updates _as long as_ we also skip replying them below. And
                 // doing is more efficient, so we do so.
-                if (!inProgress.getPartitionUpdate().isEmpty() && inProgress.isAfter(mostRecent))
+                if (!inProgress.isEmpty() && inProgress.isAfter(mostRecent))
                 {
                     Tracing.trace("Finishing incomplete paxos round {}", inProgress);
                     casMetrics.unfinishedCommit.inc();
-                    Commit refreshedInProgress = Commit.newProposal(ballot, inProgress.getPartitionUpdate());
+                    Commit refreshedInProgress = Commit.newProposal(ballot, inProgress.update);
                     if (proposePaxos(refreshedInProgress, paxosPlan, false, requestTime))
                     {
                         commitPaxos(refreshedInProgress, consistencyForCommit, false, requestTime);
@@ -790,7 +790,7 @@ private static ConsensusAttemptResult legacyCas(TableMetadata metadata,
     private static PrepareCallback preparePaxos(Commit toPrepare, ReplicaPlan.ForPaxosWrite replicaPlan, Dispatcher.RequestTime requestTime)
     throws WriteTimeoutException
     {
-        PrepareCallback callback = new PrepareCallback(toPrepare.getPartitionUpdate().partitionKey(), toPrepare.getPartitionUpdate().metadata(), replicaPlan.requiredParticipants(), replicaPlan.consistencyLevel(), requestTime);
+        PrepareCallback callback = new PrepareCallback(toPrepare.partitionKey(), toPrepare.metadata(), replicaPlan.requiredParticipants(), replicaPlan.consistencyLevel(), requestTime);
         Message<Commit> message = Message.out(PAXOS_PREPARE_REQ, toPrepare);
 
         boolean hasLocalRequest = false;
@@ -871,14 +871,14 @@ private static ConsensusAttemptResult legacyCas(TableMetadata metadata,
     private static void commitPaxos(Commit proposal, ConsistencyLevel consistencyLevel, boolean allowHints, Dispatcher.RequestTime requestTime) throws WriteTimeoutException
     {
         // Check if this is a tracked keyspace
-        String keyspaceName = proposal.getPartitionUpdate().metadata().keyspace;
+        String keyspaceName = proposal.metadata().keyspace;
         org.apache.cassandra.schema.KeyspaceMetadata ksMetadata = org.apache.cassandra.schema.Schema.instance.getKeyspaceMetadata(keyspaceName);
         
         if (ksMetadata != null && ksMetadata.params.replicationType.isTracked())
         {
             // For tracked keyspaces, check if we need to forward or execute directly
             Keyspace keyspace = Keyspace.open(keyspaceName);
-            Token tk = proposal.getPartitionUpdate().partitionKey().getToken();
+            Token tk = proposal.partitionKey().getToken();
             ReplicaPlan.ForWrite replicaPlan = ReplicaPlans.forWrite(keyspace, consistencyLevel, tk, ReplicaPlans.writeAll);
             
             if (isTrackedKeyspaceRequiringForwarding(proposal, replicaPlan.liveAndDown()))
@@ -902,9 +902,9 @@ private static ConsensusAttemptResult legacyCas(TableMetadata metadata,
     public static void commitPaxosTracked(Commit proposal, ConsistencyLevel consistencyLevel, Dispatcher.RequestTime requestTime) throws WriteTimeoutException
     {
         boolean shouldBlock = consistencyLevel != ConsistencyLevel.ANY;
-        String keyspaceName = proposal.getPartitionUpdate().metadata().keyspace;
+        String keyspaceName = proposal.metadata().keyspace;
         Keyspace keyspace = Keyspace.open(keyspaceName);
-        Token tk = proposal.getPartitionUpdate().partitionKey().getToken();
+        Token tk = proposal.partitionKey().getToken();
 
         // Generate mutation ID for tracked keyspace
         org.apache.cassandra.replication.MutationId mutationId = org.apache.cassandra.replication.MutationTrackingService.instance.nextMutationId(keyspaceName, tk);
@@ -962,7 +962,7 @@ private static ConsensusAttemptResult legacyCas(TableMetadata metadata,
     private static void commitPaxosUntracked(Commit proposal, ConsistencyLevel consistencyLevel, boolean allowHints, Dispatcher.RequestTime requestTime) throws WriteTimeoutException
     {
         boolean shouldBlock = consistencyLevel != ConsistencyLevel.ANY;
-        PartitionUpdate update = proposal.getPartitionUpdate();
+        PartitionUpdate update = proposal.update;
         Keyspace keyspace = Keyspace.open(update.metadata().keyspace);
 
         Token tk = update.partitionKey().getToken();
@@ -1058,7 +1058,7 @@ private static ConsensusAttemptResult legacyCas(TableMetadata metadata,
     private static boolean isTrackedKeyspaceRequiringForwarding(Commit proposal, EndpointsForToken participants)
     {
         // Get keyspace metadata from the commit's table metadata
-        String keyspaceName = proposal.getPartitionUpdate().metadata().keyspace;
+        String keyspaceName = proposal.metadata().keyspace;
         org.apache.cassandra.schema.KeyspaceMetadata ksMetadata = org.apache.cassandra.schema.Schema.instance.getKeyspaceMetadata(keyspaceName);
         
         if (ksMetadata == null || !ksMetadata.params.replicationType.isTracked())

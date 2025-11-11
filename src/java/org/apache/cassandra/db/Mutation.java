@@ -29,6 +29,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLongFieldUpdater;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
+import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 
 import com.google.common.base.Preconditions;
@@ -211,6 +212,13 @@ public class Mutation implements IMutation, Supplier<Mutation>
     public ImmutableCollection<PartitionUpdate> getPartitionUpdates()
     {
         return modifications.values();
+    }
+
+    public @Nonnull PartitionUpdate getOnlyUpdate()
+    {
+        checkState(modifications.size() == 1, "Should only have one PartitionUpdate");
+        //noinspection ConstantConditions
+        return modifications().values().iterator().next();
     }
 
     public long getApproxCreatedAtNanos()
