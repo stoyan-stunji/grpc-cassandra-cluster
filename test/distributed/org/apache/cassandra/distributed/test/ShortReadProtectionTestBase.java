@@ -56,7 +56,7 @@ import static org.apache.cassandra.distributed.shared.AssertUtils.row;
  * Base class for testing short read protection, the mechanism that ensures distributed queries at read consistency levels > ONE/LOCAL_ONE
  * avoid short reads that might happen when a limit is used and reconciliation accepts less rows than such limit.
  */
-public abstract class AbstractShortReadProtectionTest extends TestBaseImpl
+public abstract class ShortReadProtectionTestBase extends TestBaseImpl
 {
     private static final int NUM_NODES = 3;
     private static final int[] PAGE_SIZES = new int[]{ 1, 10 };

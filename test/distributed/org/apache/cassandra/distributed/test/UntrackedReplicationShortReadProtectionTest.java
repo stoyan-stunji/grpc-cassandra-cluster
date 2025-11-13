@@ -27,7 +27,7 @@ import org.apache.cassandra.schema.ReplicationType;
  * Tests short read protection with untracked replication.
  */
 @RunWith(Parameterized.class)
-public class UntrackedReplicationShortReadProtectionTest extends AbstractShortReadProtectionTest
+public class UntrackedReplicationShortReadProtectionTest extends ShortReadProtectionTestBase
 {
     @Override
     protected ReplicationType getReplicationType()
