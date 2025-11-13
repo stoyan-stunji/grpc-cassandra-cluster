@@ -21,6 +21,9 @@ package org.apache.cassandra.service.paxos;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.db.Keyspace;
+import org.apache.cassandra.exceptions.RequestFailure;
+import org.apache.cassandra.exceptions.RequestFailureReason;
 import org.apache.cassandra.net.IVerbHandler;
 import org.apache.cassandra.net.Message;
 import org.apache.cassandra.net.MessagingService;
@@ -52,8 +55,21 @@ public class PaxosCommitForwardHandler implements IVerbHandler<PaxosCommitForwar
 
         try
         {
+            String ksName = request.proposal.metadata().keyspace;
+            Keyspace keyspace = Keyspace.openIfExists(ksName);
+            if (keyspace == null)
+            {
+                MessagingService.instance().respondWithFailure(RequestFailureReason.INCOMPATIBLE_SCHEMA, message);
+                logger.error("Failed to forward paxos commit for non-existent keyspace " + ksName);
+                return;
+            }
+
+            // TODO(review): Is it necessary to fail here?
+            if (!keyspace.getMetadata().params.replicationType.isTracked())
+                throw new IllegalStateException("Asked to perform forwarded commit, but keyspace " + ksName + " is not tracked");
+
             // Call commitPaxosTracked directly since we're on a replica handling a forwarded tracked request
-            StorageProxy.commitPaxosTracked(request.proposal, request.consistencyLevel, Dispatcher.RequestTime.forImmediateExecution());
+            StorageProxy.commitPaxosTracked(keyspace, request.proposal, request.consistencyLevel, Dispatcher.RequestTime.forImmediateExecution());
             
             // Send success response back to original coordinator
             MessagingService.instance().respond(NoPayload.noPayload, message);
@@ -61,7 +77,7 @@ public class PaxosCommitForwardHandler implements IVerbHandler<PaxosCommitForwar
         catch (Exception e)
         {
             logger.error("Failed to execute forwarded Paxos commit for {}", request.proposal, e);
-            MessagingService.instance().respondWithFailure(org.apache.cassandra.exceptions.RequestFailureReason.UNKNOWN, message);
+            MessagingService.instance().respondWithFailure(RequestFailure.forException(e), message);
         }
     }
 }

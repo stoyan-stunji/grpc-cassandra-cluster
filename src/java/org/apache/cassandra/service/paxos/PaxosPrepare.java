@@ -1343,6 +1343,7 @@ public class PaxosPrepare extends PaxosRequestCallback<PaxosPrepare.Response> im
 
         private static Future<? extends IReadResponse> readTracked(TrackedRead.Request read, RequestTime requestTime, ClusterMetadata cm)
         {
+            // TODO(accord): This doesn't honor reads for recovery when going down the tracked path which Accord needs
             if (read.kind() == TRACKED_DATA_READ)
                 return readTrackedData((DataRequest)read, requestTime, cm);
             else

@@ -772,7 +772,7 @@ public class PaxosState implements PaxosOperationLock
                     {
                         Tracing.trace("Promise rejected; {} is not sufficiently newer than {}", toPrepare, before.promised);
                         // return the currently promised ballot (not the last accepted one) so the coordinator can make sure it uses newer ballot next time (#5667)
-                        return new PrepareResponse(false, new Commit(before.promised, toPrepare.mutation), before.committed);
+                        return new PrepareResponse(false, Commit.create(before.promised, toPrepare.mutation), before.committed);
                     }
                 }
             }

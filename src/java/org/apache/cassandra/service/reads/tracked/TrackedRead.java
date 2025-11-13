@@ -456,7 +456,6 @@ public abstract class TrackedRead<E extends Endpoints<E>, P extends ReplicaPlan.
         public abstract void executeLocally(Message<? extends Request> message, ClusterMetadata metadata);
 
         public abstract Future<? extends IReadResponse> executeLocally(Request request, ClusterMetadata metadata, RequestTime requestTime);
-
     }
 
     public static class DataRequest extends Request

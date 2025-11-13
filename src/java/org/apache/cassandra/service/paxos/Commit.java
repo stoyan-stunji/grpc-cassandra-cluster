@@ -23,7 +23,6 @@ package org.apache.cassandra.service.paxos;
 
 import java.io.IOException;
 import java.util.function.BiFunction;
-import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 
 import com.google.common.base.Objects;
@@ -281,24 +280,44 @@ public class Commit
         }
     }
 
+    public interface Commitable
+    {
+        enum CommitableKind
+        {
+            PARTITION_UPDATE, MUTATION;
+        }
+
+        CommitableKind commitableKind();
+    }
+
     public final Ballot ballot;
     public final Mutation mutation;
     public final PartitionUpdate update;
 
-    /**
-     * Unwrapping a Mutation and using this constructor is a problem becaues it drops the mutation id
-     */
-    public Commit(Ballot ballot, PartitionUpdate update)
+    public static Commit create(Ballot ballot, Commitable commitable)
+    {
+        switch (commitable.commitableKind())
+        {
+            case MUTATION:
+                return new Commit(ballot, (Mutation)commitable);
+            case PARTITION_UPDATE:
+                return new Commit(ballot, (PartitionUpdate) commitable);
+            default:
+                throw new AssertionError("Unexpected commitableKind: " + commitable.commitableKind());
+        }
+    }
+
+    private Commit(Ballot ballot, PartitionUpdate update)
     {
         assert ballot != null;
         assert update != null;
 
         this.ballot = ballot;
-        this.mutation = new Mutation(MutationId.fixme(), update, PotentialTxnConflicts.ALLOW);
+        this.mutation = new Mutation(MutationId.none(), update, PotentialTxnConflicts.ALLOW);
         this.update = update;
     }
 
-    public Commit(Ballot ballot, Mutation mutation)
+    private Commit(Ballot ballot, Mutation mutation)
     {
         assert ballot != null;
         assert mutation != null;
@@ -367,7 +386,6 @@ public class Commit
         if (mutationId == null || mutation.id().equals(mutationId))
             return mutation;
         
-        // Create new mutation with the specified ID
         PartitionUpdate update = mutation.getOnlyUpdate();
         return new Mutation(mutationId, update, mutation.potentialTxnConflicts());
     }

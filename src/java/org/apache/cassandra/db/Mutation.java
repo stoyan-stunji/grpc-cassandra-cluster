@@ -57,6 +57,7 @@ import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.schema.TableId;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.service.AbstractWriteResponseHandler;
+import org.apache.cassandra.service.paxos.Commit.Commitable;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.Pair;
 import org.apache.cassandra.utils.concurrent.Future;
@@ -68,7 +69,7 @@ import static org.apache.cassandra.net.MessagingService.VERSION_51;
 import static org.apache.cassandra.net.MessagingService.VERSION_52;
 import static org.apache.cassandra.utils.MonotonicClock.Global.approxTime;
 
-public class Mutation implements IMutation, Supplier<Mutation>
+public class Mutation implements IMutation, Supplier<Mutation>, Commitable
 {
     public static final MutationSerializer serializer = new MutationSerializer();
     public static final int ALLOW_POTENTIAL_TRANSACTION_CONFLICTS = 0x01;
@@ -472,6 +473,12 @@ public class Mutation implements IMutation, Supplier<Mutation>
     public static SimpleBuilder simpleBuilder(MutationId mutationId, String keyspaceName, DecoratedKey partitionKey)
     {
         return new SimpleBuilders.MutationBuilder(mutationId, keyspaceName, partitionKey);
+    }
+
+    @Override
+    public CommitableKind commitableKind()
+    {
+        return CommitableKind.MUTATION;
     }
 
     /**

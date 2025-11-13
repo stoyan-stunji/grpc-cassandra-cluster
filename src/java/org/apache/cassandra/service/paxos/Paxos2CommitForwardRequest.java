@@ -31,7 +31,6 @@ import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.locator.EndpointsForToken;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.locator.Replica;
-import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.service.paxos.Commit.Agreed;
 
 import static org.apache.cassandra.dht.AbstractBounds.tokenSerializer;

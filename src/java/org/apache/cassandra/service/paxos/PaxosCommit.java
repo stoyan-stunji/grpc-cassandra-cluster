@@ -21,14 +21,19 @@ package org.apache.cassandra.service.paxos;
 import java.util.concurrent.atomic.AtomicLongFieldUpdater;
 import java.util.function.Consumer;
 
+import javax.annotation.Nullable;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.agrona.collections.IntHashSet;
 import org.apache.cassandra.concurrent.ExecutorPlus;
 import org.apache.cassandra.config.CassandraRelevantProperties;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ConsistencyLevel;
+import org.apache.cassandra.db.KeyspaceNotDefinedException;
 import org.apache.cassandra.db.Mutation;
+import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.exceptions.RequestFailure;
 import org.apache.cassandra.locator.EndpointsForToken;
 import org.apache.cassandra.locator.InOurDc;
@@ -39,6 +44,8 @@ import org.apache.cassandra.net.IVerbHandler;
 import org.apache.cassandra.net.Message;
 import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.net.NoPayload;
+import org.apache.cassandra.net.RequestCallback;
+import org.apache.cassandra.net.Verb;
 import org.apache.cassandra.replication.MutationId;
 import org.apache.cassandra.replication.MutationTrackingService;
 import org.apache.cassandra.schema.KeyspaceMetadata;
@@ -46,8 +53,10 @@ import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.service.paxos.Paxos.Participants;
 import org.apache.cassandra.tcm.ClusterMetadata;
 import org.apache.cassandra.tracing.Tracing;
+import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.concurrent.ConditionAsConsumer;
 
+import static com.google.common.base.Preconditions.checkState;
 import static java.util.Collections.emptyMap;
 import static org.apache.cassandra.exceptions.RequestFailureReason.UNKNOWN;
 import static org.apache.cassandra.net.Verb.PAXOS2_COMMIT_REMOTE_REQ;
@@ -107,9 +116,8 @@ public class PaxosCommit<OnDone extends Consumer<? super PaxosCommit.Status>> ex
     final int required;
     final OnDone onDone;
 
-    // Mutation tracking fields for tracked keyspaces
-    final MutationId mutationId;
-    final org.agrona.collections.IntHashSet remoteReplicas;
+    @Nullable
+    final IntHashSet remoteReplicas;
 
     /**
      * packs two 32-bit integers;
@@ -126,24 +134,25 @@ public class PaxosCommit<OnDone extends Consumer<? super PaxosCommit.Status>> ex
         // Check if this is a tracked keyspace and generate mutation ID if needed
         String keyspaceName = commit.metadata().keyspace;
         KeyspaceMetadata ksMetadata = Schema.instance.getKeyspaceMetadata(keyspaceName);
-        boolean isTracked = ksMetadata != null && ksMetadata.params.replicationType.isTracked();
+        if (ksMetadata == null)
+            throw new KeyspaceNotDefinedException(keyspaceName);
+        boolean isTracked = ksMetadata.params.replicationType.isTracked();
         
         MutationId mutationId = null;
         Agreed commitToUse = commit;
-        org.agrona.collections.IntHashSet remoteReplicas = null;
-        
+        IntHashSet remoteReplicas = null;
         if (isTracked)
         {
             // Generate mutation ID for tracked keyspace
-            org.apache.cassandra.dht.Token token = commit.partitionKey().getToken();
+            Token token = commit.partitionKey().getToken();
             mutationId = MutationTrackingService.instance.nextMutationId(keyspaceName, token);
             
             // Create commit with proper mutation ID
-            org.apache.cassandra.db.Mutation mutationWithId = commit.makeMutation(mutationId);
+            Mutation mutationWithId = commit.makeMutation(mutationId);
             commitToUse = new Commit.Agreed(commit.ballot, mutationWithId);
             
             // Collect remote replicas for tracking service
-            remoteReplicas = new org.agrona.collections.IntHashSet();
+            remoteReplicas = new IntHashSet();
             ClusterMetadata metadata = ClusterMetadata.current();
             for (int i = 0; i < replicas.size(); i++)
             {
@@ -162,7 +171,6 @@ public class PaxosCommit<OnDone extends Consumer<? super PaxosCommit.Status>> ex
         this.replicas = replicas;
         this.onDone = onDone;
         this.required = required;
-        this.mutationId = mutationId;
         this.remoteReplicas = remoteReplicas;
         
         if (required == 0)
@@ -283,9 +291,10 @@ public class PaxosCommit<OnDone extends Consumer<? super PaxosCommit.Status>> ex
         for (int i = 0, mi = allDown.size(); i < mi ; ++i)
             onFailure(allDown.endpoint(i), RequestFailure.NODE_DOWN);
 
-        // Register write request with tracking service for tracked keyspaces
-        if (mutationId != null && remoteReplicas != null && !remoteReplicas.isEmpty())
+        // Tracked if remoteReplicas != null, register write request with tracking service for tracked keyspaces
+        if (remoteReplicas != null)
         {
+            checkState(!remoteReplicas.isEmpty());
             MutationTrackingService.instance.sentWriteRequest(commit.makeMutation(), remoteReplicas);
         }
 
@@ -320,6 +329,11 @@ public class PaxosCommit<OnDone extends Consumer<? super PaxosCommit.Status>> ex
         return locator.local().sameDatacenter(locator.location(destination));
     }
 
+    private boolean isTracked()
+    {
+        return !commit.mutation.id().equals(MutationId.none());
+    }
+
     /**
      * Record a failure or timeout, and maybe submit a hint to {@code from}
      */
@@ -330,10 +344,8 @@ public class PaxosCommit<OnDone extends Consumer<? super PaxosCommit.Status>> ex
             logger.trace("{} {} from {}", commit, reason, from);
 
         // Track failed response for tracked keyspaces
-        if (mutationId != null)
-        {
-            MutationTrackingService.instance.retryFailedWrite(mutationId, from, reason);
-        }
+        if (isTracked())
+            MutationTrackingService.instance.retryFailedWrite(commit.mutation.id(), from, reason);
 
         response(false, from);
         Replica replica = replicas.lookup(from);
@@ -351,10 +363,8 @@ public class PaxosCommit<OnDone extends Consumer<? super PaxosCommit.Status>> ex
 
         // Track successful response for tracked keyspaces 
         // (Local mutations are witnessed from Keyspace.applyInternalTracked)
-        if (mutationId != null && response != null)
-        {
-            MutationTrackingService.instance.receivedWriteResponse(mutationId, response.from());
-        }
+        if (isTracked())
+            MutationTrackingService.instance.receivedWriteResponse(commit.mutation.id(), response.from());
 
         response(true, response.from());
     }
@@ -371,9 +381,12 @@ public class PaxosCommit<OnDone extends Consumer<? super PaxosCommit.Status>> ex
     public void onResponse(NoPayload response, InetAddressAndPort from)
     {
         // Track successful response for tracked keyspaces
-        if (mutationId != null && response != null)
+        if (isTracked())
         {
-            MutationTrackingService.instance.receivedWriteResponse(mutationId, from);
+            if (response != null)
+                MutationTrackingService.instance.receivedWriteResponse(commit.mutation.id(), from);
+            else
+                MutationTrackingService.instance.retryFailedWrite(commit.mutation.id(), from, RequestFailure.UNKNOWN);
         }
         
         response(response != null, from);
@@ -454,13 +467,15 @@ public class PaxosCommit<OnDone extends Consumer<? super PaxosCommit.Status>> ex
     {
         // Get keyspace metadata from the commit's table metadata
         String keyspaceName = commit.metadata().keyspace;
-        org.apache.cassandra.schema.KeyspaceMetadata ksMetadata = org.apache.cassandra.schema.Schema.instance.getKeyspaceMetadata(keyspaceName);
+        KeyspaceMetadata ksMetadata = Schema.instance.getKeyspaceMetadata(keyspaceName);
+        if (ksMetadata == null)
+            throw new KeyspaceNotDefinedException("Keyspace " + keyspaceName + " does not exist");
         
-        if (ksMetadata == null || !ksMetadata.params.replicationType.isTracked())
+        if (!ksMetadata.params.replicationType.isTracked())
             return false;
             
         // Check if current coordinator is not a replica
-        InetAddressAndPort localEndpoint = org.apache.cassandra.utils.FBUtilities.getBroadcastAddressAndPort();
+        InetAddressAndPort localEndpoint = FBUtilities.getBroadcastAddressAndPort();
         boolean isLocalReplica = all.endpoints().contains(localEndpoint);
         return !isLocalReplica;
     }
@@ -478,7 +493,7 @@ public class PaxosCommit<OnDone extends Consumer<? super PaxosCommit.Status>> ex
                                                                          ConsistencyLevel consistencyForCommit,
                                                                          T onDone)
     {
-        InetAddressAndPort localEndpoint = org.apache.cassandra.utils.FBUtilities.getBroadcastAddressAndPort();
+        InetAddressAndPort localEndpoint = FBUtilities.getBroadcastAddressAndPort();
         
         // Find first live replica to forward to
         InetAddressAndPort replicaCoordinator = null;
@@ -494,7 +509,7 @@ public class PaxosCommit<OnDone extends Consumer<? super PaxosCommit.Status>> ex
         if (replicaCoordinator == null)
         {
             // No live replica available
-            onDone.accept(new Status(new Paxos.MaybeFailure(false, all.size(), required, 0, emptyMap())));
+            onDone.accept(new Status(new Paxos.MaybeFailure(true, all.size(), required, 0, emptyMap())));
             return;
         }
         
@@ -502,31 +517,31 @@ public class PaxosCommit<OnDone extends Consumer<? super PaxosCommit.Status>> ex
         Paxos2CommitForwardRequest forwardRequest = new Paxos2CommitForwardRequest(commit, consistencyForConsensus, consistencyForCommit, 
                                                                                    all, allLive, allDown,
                                                                                    required, isUrgent);
-        org.apache.cassandra.net.Message<Paxos2CommitForwardRequest> message = org.apache.cassandra.net.Message.out(org.apache.cassandra.net.Verb.PAXOS2_COMMIT_FORWARD_REQ, forwardRequest);
+        Message<Paxos2CommitForwardRequest> message = Message.out(Verb.PAXOS2_COMMIT_FORWARD_REQ, forwardRequest);
         
         // Create callback to handle forwarding response
-        org.apache.cassandra.net.RequestCallback<org.apache.cassandra.net.NoPayload> callback = new org.apache.cassandra.net.RequestCallback<org.apache.cassandra.net.NoPayload>()
+        RequestCallback<NoPayload> callback = new RequestCallback<NoPayload>()
         {
             @Override
-            public void onResponse(org.apache.cassandra.net.Message<org.apache.cassandra.net.NoPayload> response)
+            public void onResponse(Message<NoPayload> response)
             {
                 onDone.accept(success);
             }
 
             @Override
-            public void onFailure(InetAddressAndPort from, org.apache.cassandra.exceptions.RequestFailure reason)
+            public void onFailure(InetAddressAndPort from, RequestFailure reason)
             {
-                onDone.accept(new Status(new Paxos.MaybeFailure(false, all.size(), required, 0, emptyMap())));
+                onDone.accept(new Status(new Paxos.MaybeFailure(true, all.size(), required, 0, emptyMap())));
             }
         };
         
         try
         {
-            org.apache.cassandra.net.MessagingService.instance().sendWithCallback(message, replicaCoordinator, callback);
+            MessagingService.instance().sendWithCallback(message, replicaCoordinator, callback);
         }
         catch (Exception e)
         {
-            onDone.accept(new Status(new Paxos.MaybeFailure(false, all.size(), required, 0, emptyMap())));
+            onDone.accept(new Status(new Paxos.MaybeFailure(true, all.size(), required, 0, emptyMap())));
         }
     }
 

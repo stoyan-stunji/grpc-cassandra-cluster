@@ -54,6 +54,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import accord.primitives.Txn;
+import org.agrona.collections.IntHashSet;
 import org.apache.cassandra.batchlog.Batch;
 import org.apache.cassandra.batchlog.BatchlogManager;
 import org.apache.cassandra.concurrent.DebuggableTask.RunnableDebuggableTask;
@@ -69,6 +70,7 @@ import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.EmptyIterators;
 import org.apache.cassandra.db.IMutation;
 import org.apache.cassandra.db.Keyspace;
+import org.apache.cassandra.db.KeyspaceNotDefinedException;
 import org.apache.cassandra.db.MessageParams;
 import org.apache.cassandra.db.Mutation;
 import org.apache.cassandra.db.PartitionPosition;
@@ -128,9 +130,13 @@ import org.apache.cassandra.net.ForwardingInfo;
 import org.apache.cassandra.net.Message;
 import org.apache.cassandra.net.MessageFlag;
 import org.apache.cassandra.net.MessagingService;
+import org.apache.cassandra.net.NoPayload;
 import org.apache.cassandra.net.RequestCallback;
 import org.apache.cassandra.net.Verb;
+import org.apache.cassandra.replication.MutationId;
+import org.apache.cassandra.replication.MutationTrackingService;
 import org.apache.cassandra.replication.TrackedWriteRequest;
+import org.apache.cassandra.schema.KeyspaceMetadata;
 import org.apache.cassandra.schema.PartitionDenylist;
 import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.schema.SchemaConstants;
@@ -184,11 +190,14 @@ import org.apache.cassandra.utils.NoSpamLogger;
 import org.apache.cassandra.utils.Pair;
 import org.apache.cassandra.utils.Throwables;
 import org.apache.cassandra.utils.TimeUUID;
+import org.apache.cassandra.utils.concurrent.AsyncPromise;
 import org.apache.cassandra.utils.concurrent.CountDownLatch;
 import org.apache.cassandra.utils.concurrent.Future;
+import org.apache.cassandra.utils.concurrent.Promise;
 import org.apache.cassandra.utils.concurrent.UncheckedInterruptedException;
 
 import static accord.primitives.Txn.Kind.Read;
+import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.collect.Iterables.concat;
 import static java.util.Collections.singleton;
@@ -870,18 +879,21 @@ private static ConsensusAttemptResult legacyCas(TableMetadata metadata,
 
     private static void commitPaxos(Commit proposal, ConsistencyLevel consistencyLevel, boolean allowHints, Dispatcher.RequestTime requestTime) throws WriteTimeoutException
     {
+        checkArgument(!proposal.isEmpty());
         // Check if this is a tracked keyspace
         String keyspaceName = proposal.metadata().keyspace;
-        org.apache.cassandra.schema.KeyspaceMetadata ksMetadata = org.apache.cassandra.schema.Schema.instance.getKeyspaceMetadata(keyspaceName);
+        Keyspace keyspace = Keyspace.openIfExists(keyspaceName);
+        if (keyspace == null)
+            throw new KeyspaceNotDefinedException("Keyspace " + keyspaceName + " does not exist");
+        KeyspaceMetadata ksMetadata = keyspace.getMetadata();
         
-        if (ksMetadata != null && ksMetadata.params.replicationType.isTracked())
+        if (ksMetadata.params.replicationType.isTracked())
         {
             // For tracked keyspaces, check if we need to forward or execute directly
-            Keyspace keyspace = Keyspace.open(keyspaceName);
             Token tk = proposal.partitionKey().getToken();
             ReplicaPlan.ForWrite replicaPlan = ReplicaPlans.forWrite(keyspace, consistencyLevel, tk, ReplicaPlans.writeAll);
             
-            if (isTrackedKeyspaceRequiringForwarding(proposal, replicaPlan.liveAndDown()))
+            if (isTrackedKeyspaceRequiringPaxosCommitForwarding(ksMetadata, proposal, replicaPlan.liveAndDown()))
             {
                 // Forward to a replica coordinator
                 forwardPaxosCommit(proposal, consistencyLevel, replicaPlan);
@@ -889,42 +901,37 @@ private static ConsensusAttemptResult legacyCas(TableMetadata metadata,
             else
             {
                 // Execute directly using tracked logic
-                commitPaxosTracked(proposal, consistencyLevel, requestTime);
+                commitPaxosTracked(keyspace, proposal, consistencyLevel, requestTime);
             }
         }
         else
         {
             // For untracked keyspaces, use existing logic
-            commitPaxosUntracked(proposal, consistencyLevel, allowHints, requestTime);
+            commitPaxosUntracked(keyspace, proposal, consistencyLevel, allowHints, requestTime);
         }
     }
 
-    public static void commitPaxosTracked(Commit proposal, ConsistencyLevel consistencyLevel, Dispatcher.RequestTime requestTime) throws WriteTimeoutException
+    public static void commitPaxosTracked(Keyspace keyspace, Commit proposal, ConsistencyLevel consistencyLevel, Dispatcher.RequestTime requestTime) throws WriteTimeoutException
     {
         boolean shouldBlock = consistencyLevel != ConsistencyLevel.ANY;
         String keyspaceName = proposal.metadata().keyspace;
-        Keyspace keyspace = Keyspace.open(keyspaceName);
         Token tk = proposal.partitionKey().getToken();
 
         // Generate mutation ID for tracked keyspace
-        org.apache.cassandra.replication.MutationId mutationId = org.apache.cassandra.replication.MutationTrackingService.instance.nextMutationId(keyspaceName, tk);
-        org.apache.cassandra.db.Mutation mutationWithId = proposal.makeMutation(mutationId);
-        proposal = new Commit(proposal.ballot, mutationWithId);
+        MutationId mutationId = MutationTrackingService.instance.nextMutationId(keyspaceName, tk);
+        Mutation mutationWithId = proposal.makeMutation(mutationId);
+        proposal = Commit.create(proposal.ballot, mutationWithId);
 
         // NOTE: this ReplicaPlan is a lie, this usage of ReplicaPlan could do with being clarified - the selected() collection is essentially (I think) never used
         ReplicaPlan.ForWrite replicaPlan = ReplicaPlans.forWrite(keyspace, consistencyLevel, tk, ReplicaPlans.writeAll);
         AbstractReplicationStrategy rs = replicaPlan.replicationStrategy();
 
-        // Create tracked response handler
-        AbstractWriteResponseHandler<?> responseHandler = null;
-        if (shouldBlock)
-        {
-            AbstractWriteResponseHandler<Commit> baseHandler = rs.getWriteResponseHandler(replicaPlan, null, WriteType.SIMPLE, null, requestTime);
-            responseHandler = TrackedWriteResponseHandler.wrap(baseHandler, mutationId);
-        }
+        // Always create tracked response handler even if not blocking
+        AbstractWriteResponseHandler<?> responseHandler = rs.getWriteResponseHandler(replicaPlan, null, WriteType.SIMPLE, null, requestTime);
+        responseHandler = TrackedWriteResponseHandler.wrap(responseHandler, mutationId);
 
         // Collect remote replicas for tracking service
-        org.agrona.collections.IntHashSet remoteReplicas = new org.agrona.collections.IntHashSet();
+        IntHashSet remoteReplicas = new IntHashSet();
         // Send messages to replicas
         Message<Commit> message = Message.outWithFlag(PAXOS_COMMIT_REQ, proposal, MessageFlag.CALL_BACK_ON_FAILURE);
         for (Replica replica : replicaPlan.liveAndDown())
@@ -932,9 +939,7 @@ private static ConsensusAttemptResult legacyCas(TableMetadata metadata,
             InetAddressAndPort destination = replica.endpoint();
             boolean replicaIsSelf = replica.isSelf();
             if (!replicaIsSelf)
-            {
-                remoteReplicas.add(org.apache.cassandra.tcm.ClusterMetadata.current().directory.peerId(replica.endpoint()).id());
-            }
+                remoteReplicas.add(ClusterMetadata.current().directory.peerId(replica.endpoint()).id());
 
             if (shouldBlock)
             {
@@ -951,19 +956,16 @@ private static ConsensusAttemptResult legacyCas(TableMetadata metadata,
 
         // Register write request with tracking service
         if (!remoteReplicas.isEmpty())
-        {
-            org.apache.cassandra.replication.MutationTrackingService.instance.sentWriteRequest(proposal.makeMutation(), remoteReplicas);
-        }
+            MutationTrackingService.instance.sentWriteRequest(proposal.makeMutation(), remoteReplicas);
 
         if (shouldBlock)
             responseHandler.get();
     }
 
-    private static void commitPaxosUntracked(Commit proposal, ConsistencyLevel consistencyLevel, boolean allowHints, Dispatcher.RequestTime requestTime) throws WriteTimeoutException
+    private static void commitPaxosUntracked(Keyspace keyspace, Commit proposal, ConsistencyLevel consistencyLevel, boolean allowHints, Dispatcher.RequestTime requestTime) throws WriteTimeoutException
     {
         boolean shouldBlock = consistencyLevel != ConsistencyLevel.ANY;
         PartitionUpdate update = proposal.update;
-        Keyspace keyspace = Keyspace.open(update.metadata().keyspace);
 
         Token tk = update.partitionKey().getToken();
 
@@ -1055,17 +1057,13 @@ private static ConsensusAttemptResult legacyCas(TableMetadata metadata,
     /**
      * Checks if this commit needs to be forwarded to a replica coordinator for tracked keyspace support.
      */
-    private static boolean isTrackedKeyspaceRequiringForwarding(Commit proposal, EndpointsForToken participants)
+    private static boolean isTrackedKeyspaceRequiringPaxosCommitForwarding(KeyspaceMetadata ksMetadata, Commit proposal, EndpointsForToken participants)
     {
-        // Get keyspace metadata from the commit's table metadata
-        String keyspaceName = proposal.metadata().keyspace;
-        org.apache.cassandra.schema.KeyspaceMetadata ksMetadata = org.apache.cassandra.schema.Schema.instance.getKeyspaceMetadata(keyspaceName);
-        
-        if (ksMetadata == null || !ksMetadata.params.replicationType.isTracked())
+        if (!ksMetadata.params.replicationType.isTracked())
             return false;
             
         // Check if current coordinator is not a replica
-        InetAddressAndPort localEndpoint = org.apache.cassandra.utils.FBUtilities.getBroadcastAddressAndPort();
+        InetAddressAndPort localEndpoint = FBUtilities.getBroadcastAddressAndPort();
         boolean isLocalReplica = participants.endpoints().contains(localEndpoint);
         return !isLocalReplica;
     }
@@ -1076,7 +1074,7 @@ private static ConsensusAttemptResult legacyCas(TableMetadata metadata,
      */
     private static void forwardPaxosCommit(Commit proposal, ConsistencyLevel consistencyLevel, ReplicaPlan.ForWrite replicaPlan) throws WriteTimeoutException
     {
-        InetAddressAndPort localEndpoint = org.apache.cassandra.utils.FBUtilities.getBroadcastAddressAndPort();
+        InetAddressAndPort localEndpoint = FBUtilities.getBroadcastAddressAndPort();
         
         // Get live replicas and filter out local node
         EndpointsForToken liveReplicas = replicaPlan.live().filter(replica -> !replica.endpoint().equals(localEndpoint));
@@ -1093,21 +1091,21 @@ private static ConsensusAttemptResult legacyCas(TableMetadata metadata,
         
         // Create forward request with participant list
         PaxosCommitForwardRequest forwardRequest = new PaxosCommitForwardRequest(proposal, consistencyLevel);
-        org.apache.cassandra.net.Message<PaxosCommitForwardRequest> message = org.apache.cassandra.net.Message.out(PAXOS_COMMIT_FORWARD_REQ, forwardRequest);
+        Message<PaxosCommitForwardRequest> message = Message.out(PAXOS_COMMIT_FORWARD_REQ, forwardRequest);
         
         // Use AsyncPromise for proper callback handling
-        org.apache.cassandra.utils.concurrent.Promise<org.apache.cassandra.net.NoPayload> promise = new org.apache.cassandra.utils.concurrent.AsyncPromise<>();
+        Promise<NoPayload> promise = new AsyncPromise<>();
         
-        org.apache.cassandra.net.RequestCallback<org.apache.cassandra.net.NoPayload> callback = new org.apache.cassandra.net.RequestCallback<org.apache.cassandra.net.NoPayload>()
+        RequestCallback<NoPayload> callback = new RequestCallback<NoPayload>()
         {
             @Override
-            public void onResponse(org.apache.cassandra.net.Message<org.apache.cassandra.net.NoPayload> response)
+            public void onResponse(Message<NoPayload> response)
             {
                 promise.setSuccess(response.payload);
             }
 
             @Override
-            public void onFailure(InetAddressAndPort from, org.apache.cassandra.exceptions.RequestFailure reason)
+            public void onFailure(InetAddressAndPort from, RequestFailure reason)
             {
                 promise.setFailure(new WriteTimeoutException(WriteType.CAS, consistencyLevel, 0, consistencyLevel.blockFor(replicaPlan.replicationStrategy())));
             }
@@ -1115,12 +1113,12 @@ private static ConsensusAttemptResult legacyCas(TableMetadata metadata,
         
         try
         {
-            org.apache.cassandra.net.MessagingService.instance().sendWithCallback(message, replicaCoordinator, callback);
+            MessagingService.instance().sendWithCallback(message, replicaCoordinator, callback);
             
             // Wait for response with timeout
             promise.get(DatabaseDescriptor.getWriteRpcTimeout(java.util.concurrent.TimeUnit.MILLISECONDS), java.util.concurrent.TimeUnit.MILLISECONDS);
         }
-        catch (java.util.concurrent.TimeoutException e)
+        catch (TimeoutException e)
         {
             throw new WriteTimeoutException(WriteType.CAS, consistencyLevel, 0, consistencyLevel.blockFor(replicaPlan.replicationStrategy()));
         }
