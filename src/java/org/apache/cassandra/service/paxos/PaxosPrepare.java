@@ -154,6 +154,8 @@ public class PaxosPrepare extends PaxosRequestCallback<PaxosPrepare.Response> im
 
     private static Runnable onLinearizabilityViolation;
 
+    private static final Future<? extends IReadResponse> NO_READ_RESPONSE = ImmediateFuture.success(null);
+
     public static final RequestHandler requestHandler = new RequestHandler();
     public static final RequestSerializer requestSerializer = new RequestSerializer();
     public static final ResponseSerializer responseSerializer = new ResponseSerializer();
@@ -1292,7 +1294,7 @@ public class PaxosPrepare extends PaxosRequestCallback<PaxosPrepare.Response> im
                     Map<InetAddressAndPort, EndpointState> gossipInfo = verifyElectorate(request.electorate, localElectorate);
                     // TODO when 5.1 is the minimum supported version we can modify verifyElectorate to just return this epoch
                     Epoch electorateEpoch = gossipInfo.isEmpty() ? Epoch.EMPTY : localElectorate.createdAt;
-                    Future<? extends IReadResponse> readResponseFuture = null;
+                    Future<? extends IReadResponse> readResponseFuture = NO_READ_RESPONSE;
 
                     // Check we cannot race with a proposal, i.e. that we have not made a promise that
                     // could be in the process of making a proposal. If a majority of nodes have made no such promise
