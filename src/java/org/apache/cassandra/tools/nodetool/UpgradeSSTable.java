@@ -61,6 +61,11 @@ public class UpgradeSSTable extends AbstractCommand
             description = "Number of sstables to upgrade simultanously, set to 0 to use all available compaction threads")
     private int jobs = 2;
 
+    @Option(paramLabel = "latestColumns",
+            names = { "--latest-columns" },
+            description = "Use this flag when you want to upgrade SSTables without having e.g. dropped columns in serialisation header.")
+    private boolean latestColumnsOnly = false;
+
     @Override
     public void execute(NodeProbe probe)
     {
@@ -76,7 +81,7 @@ public class UpgradeSSTable extends AbstractCommand
                 {
                     if (retries > 0)
                         Thread.sleep(500);
-                    probe.upgradeSSTables(probe.output().out, keyspace, !includeAll, maxSSTableTimestamp, jobs, tableNames);
+                    probe.upgradeSSTables(probe.output().out, keyspace, !includeAll, maxSSTableTimestamp, jobs, latestColumnsOnly, tableNames);
                     break;
                 }
                 catch (RuntimeException cie)

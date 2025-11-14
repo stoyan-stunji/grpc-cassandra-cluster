@@ -44,7 +44,12 @@ public class DefaultCompactionWriter extends CompactionAwareWriter
 
     public DefaultCompactionWriter(ColumnFamilyStore cfs, Directories directories, ILifecycleTransaction txn, Set<SSTableReader> nonExpiredSSTables, boolean keepOriginals, int sstableLevel)
     {
-        super(cfs, directories, txn, nonExpiredSSTables, keepOriginals);
+        this(cfs, directories, txn, nonExpiredSSTables, keepOriginals, sstableLevel, false);
+    }
+
+    public DefaultCompactionWriter(ColumnFamilyStore cfs, Directories directories, ILifecycleTransaction txn, Set<SSTableReader> nonExpiredSSTables, boolean keepOriginals, int sstableLevel, boolean latestColumnsOnly)
+    {
+        super(cfs, directories, txn, nonExpiredSSTables, keepOriginals, latestColumnsOnly);
         this.sstableLevel = sstableLevel;
     }
 

@@ -40,6 +40,7 @@ import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
 import org.apache.cassandra.io.sstable.Component;
 import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
+import org.apache.cassandra.schema.DroppedColumn;
 import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.tcm.ClusterMetadataService;
 import org.apache.cassandra.utils.JVMStabilityInspector;
@@ -53,10 +54,12 @@ public class StandaloneUpgrader
     private static final String DEBUG_OPTION  = "debug";
     private static final String HELP_OPTION  = "help";
     private static final String KEEP_SOURCE = "keep-source";
+    private static final String LATEST_COLUMNS_ONLY = "latest-columns-only";
 
     public static void main(String args[])
     {
         Options options = Options.parseArgs(args);
+
         if (TEST_UTIL_ALLOW_TOOL_REINIT_FOR_TEST.getBoolean())
             DatabaseDescriptor.toolInitialization(false); //Necessary for testing
         else
@@ -91,12 +94,28 @@ public class StandaloneUpgrader
                 try
                 {
                     SSTableReader sstable = SSTableReader.openNoValidation(entry.getKey(), components, cfs);
-                    if (sstable.descriptor.version.equals(DatabaseDescriptor.getSelectedSSTableFormat().getLatestVersion()))
+                    boolean shouldAdd = false;
+                    if (options.latestColumnsOnly)
                     {
-                        sstable.selfRef().release();
-                        continue;
+                        for (DroppedColumn droppedColumn : cfs.metadata().droppedColumns.values())
+                        {
+                            if (sstable.header.columns().contains(droppedColumn.column))
+                            {
+                                shouldAdd = true;
+                                break;
+                            }
+                        }
                     }
-                    readers.add(sstable);
+
+                    if (!shouldAdd && !sstable.descriptor.version.equals(DatabaseDescriptor.getSelectedSSTableFormat().getLatestVersion()))
+                    {
+                        shouldAdd = true;
+                    }
+
+                    if (shouldAdd)
+                        readers.add(sstable);
+                    else
+                        sstable.selfRef().release();
                 }
                 catch (Exception e)
                 {
@@ -115,7 +134,7 @@ public class StandaloneUpgrader
                 try (LifecycleTransaction txn = LifecycleTransaction.offline(OperationType.UPGRADE_SSTABLES, sstable))
                 {
                     Upgrader upgrader = new Upgrader(cfs, txn, handler);
-                    upgrader.upgrade(options.keepSource);
+                    upgrader.upgrade(options.keepSource, options.latestColumnsOnly);
                 }
                 catch (Exception e)
                 {
@@ -151,6 +170,7 @@ public class StandaloneUpgrader
 
         public boolean debug;
         public boolean keepSource;
+        public boolean latestColumnsOnly;
 
         private Options(String keyspace, String cf, String snapshot)
         {
@@ -191,6 +211,7 @@ public class StandaloneUpgrader
 
                 opts.debug = cmd.hasOption(DEBUG_OPTION);
                 opts.keepSource = cmd.hasOption(KEEP_SOURCE);
+                opts.latestColumnsOnly = snapshot != null && cmd.hasOption(LATEST_COLUMNS_ONLY);
 
                 return opts;
             }
@@ -214,6 +235,7 @@ public class StandaloneUpgrader
             options.addOption(null, DEBUG_OPTION,          "display stack traces");
             options.addOption("h",  HELP_OPTION,           "display this help message");
             options.addOption("k",  KEEP_SOURCE,           "do not delete the source sstables");
+            options.addOption("l",  LATEST_COLUMNS_ONLY,   "remove dropped columns from metadata");
             return options;
         }
 

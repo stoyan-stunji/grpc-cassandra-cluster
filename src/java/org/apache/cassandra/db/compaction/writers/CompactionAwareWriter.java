@@ -62,6 +62,7 @@ public abstract class CompactionAwareWriter extends Transactional.AbstractTransa
     protected final long minRepairedAt;
     protected final TimeUUID pendingRepair;
     protected final boolean isTransient;
+    protected final boolean latestColumnsOnly;
 
     protected final SSTableRewriter sstableWriter;
     protected final ILifecycleTransaction txn;
@@ -76,7 +77,7 @@ public abstract class CompactionAwareWriter extends Transactional.AbstractTransa
                                  Set<SSTableReader> nonExpiredSSTables,
                                  boolean keepOriginals)
     {
-        this(cfs, directories, txn, nonExpiredSSTables, keepOriginals, true);
+        this(cfs, directories, txn, nonExpiredSSTables, keepOriginals, true, false);
     }
 
     public CompactionAwareWriter(ColumnFamilyStore cfs,
@@ -84,11 +85,23 @@ public abstract class CompactionAwareWriter extends Transactional.AbstractTransa
                                  ILifecycleTransaction txn,
                                  Set<SSTableReader> nonExpiredSSTables,
                                  boolean keepOriginals,
-                                 boolean earlyOpenAllowed)
+                                 boolean latestColumnsOnly)
+    {
+        this(cfs, directories, txn, nonExpiredSSTables, keepOriginals, true, latestColumnsOnly);
+    }
+
+    public CompactionAwareWriter(ColumnFamilyStore cfs,
+                                 Directories directories,
+                                 ILifecycleTransaction txn,
+                                 Set<SSTableReader> nonExpiredSSTables,
+                                 boolean keepOriginals,
+                                 boolean earlyOpenAllowed,
+                                 boolean latestColumnsOnly)
     {
         this.cfs = cfs;
         this.directories = directories;
         this.nonExpiredSSTables = nonExpiredSSTables;
+        this.latestColumnsOnly = latestColumnsOnly;
         this.txn = txn;
 
         estimatedTotalKeys = SSTableReader.getApproximateKeyCount(nonExpiredSSTables);
@@ -230,20 +243,25 @@ public abstract class CompactionAwareWriter extends Transactional.AbstractTransa
     protected void switchCompactionWriter(Directories.DataDirectory directory, DecoratedKey nextKey)
     {
         currentDirectory = directory;
-        sstableWriter.switchWriter(sstableWriter(directory, nextKey));
+        sstableWriter.switchWriter(sstableWriter(directory, nextKey, latestColumnsOnly));
     }
 
-    protected SSTableWriter sstableWriter(Directories.DataDirectory directory, DecoratedKey nextKey)
+    protected SSTableWriter sstableWriter(Directories.DataDirectory directory, DecoratedKey nextKey, boolean latestColumnsOnly)
     {
         Descriptor descriptor = cfs.newSSTableDescriptor(getDirectories().getLocationForDisk(directory));
         MetadataCollector collector = new MetadataCollector(txn.originals(), cfs.metadata().comparator)
                                       .sstableLevel(sstableLevel());
-        SerializationHeader header = SerializationHeader.make(cfs.metadata(), nonExpiredSSTables);
+        SerializationHeader header = SerializationHeader.make(cfs.metadata(), nonExpiredSSTables, latestColumnsOnly);
 
         return newWriterBuilder(descriptor).setMetadataCollector(collector)
                                            .setSerializationHeader(header)
                                            .setKeyCount(sstableKeyCount())
                                            .build(txn, cfs);
+    }
+
+    protected SSTableWriter sstableWriter(Directories.DataDirectory directory, DecoratedKey nextKey)
+    {
+        return sstableWriter(directory, nextKey, false);
     }
 
     /**

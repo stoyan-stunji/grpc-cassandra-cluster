@@ -1036,20 +1036,25 @@ public class CompactionStrategyManager implements INotificationConsumer
         return maxSSTableSizeBytes;
     }
 
-    public AbstractCompactionTask getCompactionTask(LifecycleTransaction txn, long gcBefore, long maxSSTableBytes)
+    public AbstractCompactionTask getCompactionTask(LifecycleTransaction txn, long gcBefore, long maxSSTableBytes, boolean latestColumnsOnly)
     {
         maybeReloadDiskBoundaries();
         readLock.lock();
         try
         {
             validateForCompaction(txn.originals());
-            return compactionStrategyFor(txn.originals().iterator().next()).getCompactionTask(txn, gcBefore, maxSSTableBytes);
+            return compactionStrategyFor(txn.originals().iterator().next()).getCompactionTask(txn, gcBefore, maxSSTableBytes, latestColumnsOnly);
         }
         finally
         {
             readLock.unlock();
         }
 
+    }
+
+    public AbstractCompactionTask getCompactionTask(LifecycleTransaction txn, long gcBefore, long maxSSTableBytes)
+    {
+        return getCompactionTask(txn, gcBefore, maxSSTableBytes, false);
     }
 
     private void validateForCompaction(Iterable<SSTableReader> input)

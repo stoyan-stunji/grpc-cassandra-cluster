@@ -396,9 +396,9 @@ public class NodeProbe implements AutoCloseable
         return ssProxy.verify(extendedVerify, checkVersion, diskFailurePolicy, mutateRepairStatus, checkOwnsTokens, quick, keyspaceName, tableNames);
     }
 
-    public int upgradeSSTables(String keyspaceName, boolean excludeCurrentVersion, long maxSSTableTimestamp, int jobs, String... tableNames) throws IOException, ExecutionException, InterruptedException
+    public int upgradeSSTables(String keyspaceName, boolean excludeCurrentVersion, long maxSSTableTimestamp, int jobs, boolean latestColumnsOnly, String... tableNames) throws IOException, ExecutionException, InterruptedException
     {
-        return ssProxy.upgradeSSTables(keyspaceName, excludeCurrentVersion, maxSSTableTimestamp, jobs, tableNames);
+        return ssProxy.upgradeSSTables(keyspaceName, excludeCurrentVersion, maxSSTableTimestamp, jobs, latestColumnsOnly, tableNames);
     }
 
     public int garbageCollect(String tombstoneOption, int jobs, String keyspaceName, String... tableNames) throws IOException, ExecutionException, InterruptedException
@@ -449,11 +449,11 @@ public class NodeProbe implements AutoCloseable
                 "recompressing sstables");
     }
 
-    public void upgradeSSTables(PrintStream out, String keyspaceName, boolean excludeCurrentVersion, long maxSSTableTimestamp, int jobs, String... tableNames) throws IOException, ExecutionException, InterruptedException
+    public void upgradeSSTables(PrintStream out, String keyspaceName, boolean excludeCurrentVersion, long maxSSTableTimestamp, int jobs, boolean latestColumnsOnly, String... tableNames) throws IOException, ExecutionException, InterruptedException
     {
         checkJobs(out, jobs);
         perform(out, keyspaceName,
-                () -> upgradeSSTables(keyspaceName, excludeCurrentVersion, maxSSTableTimestamp, jobs, tableNames),
+                () -> upgradeSSTables(keyspaceName, excludeCurrentVersion, maxSSTableTimestamp, jobs, latestColumnsOnly, tableNames),
                 "upgrading sstables");
     }
 

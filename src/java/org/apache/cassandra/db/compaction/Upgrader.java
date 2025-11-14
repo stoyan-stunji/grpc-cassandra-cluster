@@ -69,7 +69,7 @@ public class Upgrader
         this.estimatedRows = (long) Math.ceil((double) estimatedTotalKeys / estimatedSSTables);
     }
 
-    private SSTableWriter createCompactionWriter(StatsMetadata metadata)
+    private SSTableWriter createCompactionWriter(StatsMetadata metadata, boolean latestColumnsOnly)
     {
         MetadataCollector sstableMetadataCollector = new MetadataCollector(cfs.getComparator());
         sstableMetadataCollector.sstableLevel(sstable.getSSTableLevel());
@@ -82,14 +82,14 @@ public class Upgrader
                          .setTransientSSTable(metadata.isTransient)
                          .setTableMetadataRef(cfs.metadata)
                          .setMetadataCollector(sstableMetadataCollector)
-                         .setSerializationHeader(SerializationHeader.make(cfs.metadata(), Sets.newHashSet(sstable)))
+                         .setSerializationHeader(SerializationHeader.make(cfs.metadata(), Sets.newHashSet(sstable), latestColumnsOnly))
                          .addDefaultComponents(cfs.indexManager.listIndexGroups())
                          .setSecondaryIndexGroups(cfs.indexManager.listIndexGroups())
                          .setCompressionDictionaryManager(cfs.compressionDictionaryManager())
                          .build(transaction, cfs);
     }
 
-    public void upgrade(boolean keepOriginals)
+    public void upgrade(boolean keepOriginals, boolean latestColumnsOnly)
     {
         outputHandler.output("Upgrading " + sstable);
         long nowInSec = FBUtilities.nowInSeconds();
@@ -97,7 +97,7 @@ public class Upgrader
              AbstractCompactionStrategy.ScannerList scanners = strategyManager.getScanners(transaction.originals());
              CompactionIterator iter = new CompactionIterator(transaction.opType(), scanners.scanners, controller, nowInSec, nextTimeUUID()))
         {
-            writer.switchWriter(createCompactionWriter(sstable.getSSTableMetadata()));
+            writer.switchWriter(createCompactionWriter(sstable.getSSTableMetadata(), latestColumnsOnly));
             iter.setTargetDirectory(writer.currentWriter().getFilename());
             while (iter.hasNext())
                 writer.append(iter.next());
