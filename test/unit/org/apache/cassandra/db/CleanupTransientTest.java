@@ -30,6 +30,7 @@ import org.apache.cassandra.CassandraTestBase;
 import org.apache.cassandra.CassandraTestBase.PrepareServerNoRegister;
 import org.apache.cassandra.CassandraTestBase.UseRandomPartitioner;
 import org.apache.cassandra.SchemaLoader;
+import org.apache.cassandra.ServerTestUtils;
 import org.apache.cassandra.Util;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.compaction.CompactionManager;
@@ -41,9 +42,15 @@ import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.locator.RangesAtEndpoint;
 import org.apache.cassandra.locator.Replica;
+import org.apache.cassandra.locator.SimpleLocationProvider;
+import org.apache.cassandra.replication.MutationJournal;
 import org.apache.cassandra.replication.MutationTrackingService;
 import org.apache.cassandra.schema.KeyspaceParams;
 import org.apache.cassandra.service.StorageService;
+import org.apache.cassandra.tcm.ClusterMetadataService;
+import org.apache.cassandra.tcm.membership.NodeAddresses;
+import org.apache.cassandra.tcm.membership.NodeVersion;
+import org.apache.cassandra.tcm.transformations.Register;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
 import static org.junit.Assert.assertEquals;
@@ -76,11 +83,6 @@ public class CleanupTransientTest extends CassandraTestBase
     {
         DatabaseDescriptor.setMutationTrackingEnabled(true);
         DatabaseDescriptor.setTransientReplicationEnabledUnsafe(true);
-        SchemaLoader.createKeyspace(KEYSPACE1,
-                                    KeyspaceParams.simpleWitness("2/1"),
-                                    SchemaLoader.standardCFMD(KEYSPACE1, CF_STANDARD1),
-                                    SchemaLoader.compositeIndexCFMD(KEYSPACE1, CF_INDEXED1, true));
-
         StorageService ss = StorageService.instance;
         final int RING_SIZE = 2;
 
@@ -93,6 +95,11 @@ public class CleanupTransientTest extends CassandraTestBase
         endpointTokens.add(RandomPartitioner.instance.midpoint(RandomPartitioner.MINIMUM, new RandomPartitioner.BigIntegerToken(RandomPartitioner.MAXIMUM)));
 
         Util.createInitialRing(endpointTokens, keyTokens, hosts, hostIds, RING_SIZE);
+        MutationJournal.instance.start();
+        SchemaLoader.createKeyspace(KEYSPACE1,
+                                    KeyspaceParams.simpleWitness("2/1"),
+                                    SchemaLoader.standardCFMD(KEYSPACE1, CF_STANDARD1),
+                                    SchemaLoader.compositeIndexCFMD(KEYSPACE1, CF_INDEXED1, true));
     }
 
     @Test

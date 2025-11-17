@@ -53,6 +53,8 @@ import org.apache.cassandra.utils.Pair;
 import org.apache.cassandra.utils.bytecomparable.ByteComparable;
 import org.apache.cassandra.utils.bytecomparable.ByteSource;
 
+import static com.google.common.base.Preconditions.checkState;
+
 /**
  * This class generates a BigIntegerToken using MD5 hash.
  */
@@ -139,6 +141,9 @@ public class RandomPartitioner implements IPartitioner
                    right = rtoken.equals(MINIMUM) ? BigDecimal.ZERO : new BigDecimal(((BigIntegerToken)rtoken).token),
                    ratio = BigDecimal.valueOf(ratioToLeft);
 
+        if (ratioToLeft == 1.0)
+            return rtoken;
+
         BigInteger newToken;
 
         if (left.compareTo(right) < 0)
@@ -155,8 +160,10 @@ public class RandomPartitioner implements IPartitioner
         }
 
         assert isValidToken(newToken) : "Invalid tokens from split";
-
-        return new BigIntegerToken(newToken);
+        BigIntegerToken newBigIntegerToken = new BigIntegerToken(newToken);
+        checkState(ltoken.compareTo(newBigIntegerToken) <= 0);
+        checkState(rtoken.compareTo(newBigIntegerToken) >= 0 || rtoken.isMinimum());
+        return newBigIntegerToken;
     }
 
     public boolean supportsSplitting()
