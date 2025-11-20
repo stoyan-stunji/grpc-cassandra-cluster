@@ -58,14 +58,37 @@ public class PaxosCommitAndPrepare
     static PaxosPrepare commitAndPrepare(Agreed commit, Paxos.Participants participants, SinglePartitionReadCommand readCommand, boolean isWrite, boolean acceptEarlyReadSuccess)
     {
         Ballot ballot = newBallot(commit.ballot, participants.consistencyForConsensus);
-        Request request = new Request(commit, ballot, participants.electorate, readCommand, isWrite, true);
-        PaxosPrepare prepare = new PaxosPrepare(participants, request, acceptEarlyReadSuccess, null);
 
         Tracing.trace("Committing {}; Preparing {}", commit.ballot, ballot);
-        Message<Request> message = Message.out(PAXOS2_COMMIT_AND_PREPARE_REQ, request, participants.isUrgent());
+        /*
+         * For simplicity with tracked keyspaces do the commit as a regular commit synchronously and then separately do a regular prepare.
+         * CommitAndPrepare goes down the prepare path with a message containing the commit along with the prepare
+         * which means this node is the coordinator and would need to either re-use the original commit mutation id
+         * (which wasn't saved in the system table) or generate a new one which it might not be able to do without forwarding.
+         *
+         * All these things are tractable to do better, but for now doing something simple and correct.
+         */
+        if (readCommand.metadata().replicationType().isTracked())
+        {
+            /*
+             * Consistency for consensus is tricky to pick here. The goal of sending this commit is to unblock the prepare
+             * on nodes that are missing the commit. CommitAndPrepare is an outcome that occurs when prepare/propose already failed
+             * because enough nodes were missing a commmit so we need to try again. To keep things highly available we
+             * use the same consistency as consensus so that when we go to do the prepare there are enough nodes
+             * we know have the commit that this can succeed.
+             */
+            PaxosCommit.commit(commit, participants, participants.consistencyForConsensus, participants.consistencyForConsensus, isWrite);
+            return PaxosPrepare.prepareWithBallot(ballot, participants, readCommand, isWrite, acceptEarlyReadSuccess);
+        }
+        else
+        {
+            Request request = new Request(commit, ballot, participants.electorate, readCommand, isWrite, true);
+            PaxosPrepare prepare = new PaxosPrepare(participants, request, acceptEarlyReadSuccess, null);
+            Message<Request> message = Message.out(PAXOS2_COMMIT_AND_PREPARE_REQ, request, participants.isUrgent());
 
-        start(prepare, participants, message, RequestHandler::execute);
-        return prepare;
+            start(prepare, participants, message, RequestHandler::execute);
+            return prepare;
+        }
     }
 
     private static class Request extends PaxosPrepare.AbstractRequest<Request>
