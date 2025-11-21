@@ -56,6 +56,7 @@ import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.locator.Replica;
+import org.apache.cassandra.service.reads.tracked.TrackedDataResponse;
 import org.apache.cassandra.service.reads.tracked.TrackedRead;
 import org.apache.cassandra.service.reads.tracked.TrackedRead.DataRequest;
 import org.apache.cassandra.service.reads.tracked.TrackedRead.Id;
@@ -344,6 +345,7 @@ public class PaxosPrepare extends PaxosRequestCallback<PaxosPrepare.Response> im
 
     private final List<Message<IReadResponse>> readResponses;
     private boolean haveReadResponseWithLatest;
+    private boolean haveTrackedDataResponseIfNeeded;
     private boolean haveQuorumOfPermissions; // permissions => SUCCESS or READ_SUCCESS
     private @Nonnull List<InetAddressAndPort> withLatest; // promised and have latest commit
     private @Nullable List<InetAddressAndPort> needLatest; // promised without having witnessed latest commit, nor yet been refreshed by us
@@ -428,7 +430,7 @@ public class PaxosPrepare extends PaxosRequestCallback<PaxosPrepare.Response> im
      */
     static <R extends AbstractRequest<R>> void start(PaxosPrepare prepare, Participants participants, Message<R> send, BiFunction<R, RequestTime, Future<Response>> selfHandler)
     {
-        if (send.payload.table.replicationType().isTracked())
+        if (send.payload.read != null && send.payload.read.metadata().replicationType().isTracked())
             startTracked(prepare, participants, send, selfHandler);
         else
             startUntracked(prepare, participants, send, selfHandler);
@@ -436,6 +438,8 @@ public class PaxosPrepare extends PaxosRequestCallback<PaxosPrepare.Response> im
 
     private static <R extends AbstractRequest<R>> void startTracked(PaxosPrepare prepare, Participants participants, Message<R> send, BiFunction<R, RequestTime, Future<Response>> selfHandler)
     {
+        if (prepare.request.read == null)
+            prepare.haveTrackedDataResponseIfNeeded = true;
         Message<R> selfMessage = null;
         Message<R> summaryMessage = null;
         Id readId = Id.nextId();
@@ -500,6 +504,7 @@ public class PaxosPrepare extends PaxosRequestCallback<PaxosPrepare.Response> im
 
     private static <R extends AbstractRequest<R>> void startUntracked(PaxosPrepare prepare, Participants participants, Message<R> send, BiFunction<R, RequestTime, Future<Response>> selfHandler)
     {
+        prepare.haveTrackedDataResponseIfNeeded = true;
         Message<R> selfMessage = null;
 
         for (int i = 0, size = participants.sizeOfPoll() ; i < size ; ++i)
@@ -545,6 +550,11 @@ public class PaxosPrepare extends PaxosRequestCallback<PaxosPrepare.Response> im
             Thread.currentThread().interrupt();
             return new MaybeFailure(new Paxos.MaybeFailure(true, participants.sizeOfPoll(), participants.sizeOfConsensusQuorum, 0, emptyMap()), participants);
         }
+    }
+
+    private boolean isTracked()
+    {
+        return request.read != null && request.read.metadata().replicationType().isTracked();
     }
 
     private boolean isDone()
@@ -678,7 +688,7 @@ public class PaxosPrepare extends PaxosRequestCallback<PaxosPrepare.Response> im
             }
         }
 
-        if (!haveQuorumOfPermissions)
+        if (!haveQuorumOfPermissions || !haveTrackedDataResponseIfNeeded)
         {
             Committed newLatestCommitted = permitted.latestCommitted;
             if (newLatestCommitted.ballot.uuidTimestamp() < maxLowBound) newLatestCommitted = Committed.none(request.partitionKey, request.table);
@@ -753,9 +763,9 @@ public class PaxosPrepare extends PaxosRequestCallback<PaxosPrepare.Response> im
         }
 
         haveQuorumOfPermissions |= withLatest() + needLatest() >= participants.sizeOfConsensusQuorum;
-        if (haveQuorumOfPermissions)
+        if (haveQuorumOfPermissions && haveTrackedDataResponseIfNeeded)
         {
-            if (request.read != null && readResponses.size() < participants.sizeOfReadQuorum)
+            if (request.read != null && !isTracked() && readResponses.size() < participants.sizeOfReadQuorum)
                 throw new IllegalStateException("Insufficient read responses: " + readResponses + "; need " + participants.sizeOfReadQuorum);
 
             if (!hasOnlyPromises && !hasProposalStability)
@@ -942,6 +952,8 @@ public class PaxosPrepare extends PaxosRequestCallback<PaxosPrepare.Response> im
      */
     private void addReadResponse(IReadResponse response, InetAddressAndPort from)
     {
+        if (response.getClass() == TrackedDataResponse.class)
+            haveTrackedDataResponseIfNeeded = true;
         readResponses.add(Message.synthetic(from, PAXOS2_PREPARE_RSP, response));
     }
 

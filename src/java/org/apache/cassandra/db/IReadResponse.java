@@ -33,24 +33,12 @@ import static org.apache.cassandra.db.IReadResponse.Kind.UNTRACKED;
 
 public interface IReadResponse
 {
-    /**
-     * Returned as a response for Paxos for summary reads so Paxos knows a read response was provided
-     */
-    IReadResponse TRACKED_DUMMY = new IReadResponse()
-    {
-        @Override
-        public Kind kind()
-        {
-            return Kind.TRACKED_DUMMY;
-        }
-    };
-
     enum Kind
     {
         UNTRACKED(0),
         TRACKED_DATA(1),
         TRACKED_SUMMARY(2),
-        TRACKED_DUMMY(3);
+        NULL(3);
 
         public final int id;
 
@@ -95,7 +83,12 @@ public interface IReadResponse
         public void serialize(IReadResponse response, DataOutputPlus out, int version) throws IOException
         {
             if (version >= MessagingService.VERSION_52)
-                Kind.serializer.serialize(response.kind(), out, version);
+            {
+                if (response == null)
+                    Kind.serializer.serialize(Kind.NULL, out, version);
+                else
+                    Kind.serializer.serialize(response.kind(), out, version);
+            }
             else
                 Preconditions.checkArgument(response.kind() == UNTRACKED);
 
@@ -110,7 +103,7 @@ public interface IReadResponse
                 case TRACKED_SUMMARY:
                     TrackedSummaryResponse.serializer.serialize((TrackedSummaryResponse) response, out, version);
                     break;
-                case TRACKED_DUMMY:
+                case NULL:
                     break;
                 default:
                     throw new IllegalStateException("Unhandled kind: " + response.kind());
@@ -130,8 +123,8 @@ public interface IReadResponse
                     return TrackedDataResponse.serializer.deserialize(in, version);
                 case TRACKED_SUMMARY:
                     return TrackedSummaryResponse.serializer.deserialize(in, version);
-                case TRACKED_DUMMY:
-                    return TRACKED_DUMMY;
+                case NULL:
+                    return null;
                 default:
                     throw new IllegalStateException("Unhandled kind: " + kind);
             }
@@ -140,6 +133,9 @@ public interface IReadResponse
         @Override
         public long serializedSize(IReadResponse response, int version)
         {
+            if (response == null)
+                return 0;
+
             long size = 0;
             if (version >= MessagingService.VERSION_52)
                 size += Kind.serializer.serializedSize(response.kind(), version);
@@ -154,8 +150,7 @@ public interface IReadResponse
                     return size + TrackedDataResponse.serializer.serializedSize((TrackedDataResponse) response, version);
                 case TRACKED_SUMMARY:
                     return size + TrackedSummaryResponse.serializer.serializedSize((TrackedSummaryResponse) response, version);
-                case TRACKED_DUMMY:
-                    return size;
+                case NULL:
                 default:
                     throw new IllegalStateException("Unhandled kind: " + response.kind());
             }

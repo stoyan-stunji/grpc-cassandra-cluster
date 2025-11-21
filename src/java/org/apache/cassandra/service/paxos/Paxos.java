@@ -38,30 +38,14 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.codahale.metrics.Meter;
-import org.apache.cassandra.db.IReadResponse;
-import org.apache.cassandra.db.IReadResponse.Kind;
-import org.apache.cassandra.db.ReadResponse;
-import org.apache.cassandra.exceptions.CasWriteTimeoutException;
-import org.apache.cassandra.exceptions.ExceptionCode;
-import org.apache.cassandra.gms.FailureDetector;
-import org.apache.cassandra.locator.AbstractReplicationStrategy;
-import org.apache.cassandra.locator.EndpointsForToken;
-import org.apache.cassandra.locator.InOurDc;
-import org.apache.cassandra.locator.MetaStrategy;
-import org.apache.cassandra.locator.Replica;
-import org.apache.cassandra.locator.ReplicaLayout;
-import org.apache.cassandra.locator.ReplicaLayout.ForTokenWrite;
-import org.apache.cassandra.locator.ReplicaPlan.ForRead;
-import org.apache.cassandra.metrics.ClientRequestSizeMetrics;
-import org.apache.cassandra.net.Message;
-import org.apache.cassandra.schema.KeyspaceMetadata;
-import org.apache.cassandra.schema.SchemaConstants;
-import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.config.Config;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.db.DecoratedKey;
+import org.apache.cassandra.db.IReadResponse;
+import org.apache.cassandra.db.IReadResponse.Kind;
 import org.apache.cassandra.db.Keyspace;
+import org.apache.cassandra.db.ReadResponse;
 import org.apache.cassandra.db.SinglePartitionReadCommand;
 import org.apache.cassandra.db.WriteType;
 import org.apache.cassandra.db.partitions.FilteredPartition;
@@ -70,6 +54,8 @@ import org.apache.cassandra.db.partitions.PartitionIterators;
 import org.apache.cassandra.db.partitions.PartitionUpdate;
 import org.apache.cassandra.db.rows.RowIterator;
 import org.apache.cassandra.dht.Token;
+import org.apache.cassandra.exceptions.CasWriteTimeoutException;
+import org.apache.cassandra.exceptions.ExceptionCode;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.exceptions.IsBootstrappingException;
 import org.apache.cassandra.exceptions.ReadFailureException;
@@ -83,12 +69,26 @@ import org.apache.cassandra.exceptions.UnavailableException;
 import org.apache.cassandra.exceptions.WriteFailureException;
 import org.apache.cassandra.exceptions.WriteTimeoutException;
 import org.apache.cassandra.gms.EndpointState;
+import org.apache.cassandra.gms.FailureDetector;
 import org.apache.cassandra.gms.Gossiper;
 import org.apache.cassandra.io.IVersionedSerializer;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
+import org.apache.cassandra.locator.AbstractReplicationStrategy;
+import org.apache.cassandra.locator.EndpointsForToken;
+import org.apache.cassandra.locator.InOurDc;
 import org.apache.cassandra.locator.InetAddressAndPort;
+import org.apache.cassandra.locator.MetaStrategy;
+import org.apache.cassandra.locator.Replica;
+import org.apache.cassandra.locator.ReplicaLayout;
+import org.apache.cassandra.locator.ReplicaLayout.ForTokenWrite;
+import org.apache.cassandra.locator.ReplicaPlan.ForRead;
 import org.apache.cassandra.metrics.ClientRequestMetrics;
+import org.apache.cassandra.metrics.ClientRequestSizeMetrics;
+import org.apache.cassandra.net.Message;
+import org.apache.cassandra.schema.KeyspaceMetadata;
+import org.apache.cassandra.schema.SchemaConstants;
+import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.service.CASRequest;
 import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.service.FailureRecordingCallback.AsMap;
@@ -98,10 +98,10 @@ import org.apache.cassandra.service.paxos.PaxosPrepare.FoundIncompleteAccepted;
 import org.apache.cassandra.service.paxos.PaxosPrepare.FoundIncompleteCommitted;
 import org.apache.cassandra.service.paxos.PaxosPropose.Superseded;
 import org.apache.cassandra.service.paxos.cleanup.PaxosRepairState;
-import org.apache.cassandra.service.reads.tracked.TrackedDataResponse;
 import org.apache.cassandra.service.reads.DataResolver;
 import org.apache.cassandra.service.reads.ReadCoordinator;
 import org.apache.cassandra.service.reads.repair.NoopReadRepair;
+import org.apache.cassandra.service.reads.tracked.TrackedDataResponse;
 import org.apache.cassandra.tcm.ClusterMetadata;
 import org.apache.cassandra.tcm.Epoch;
 import org.apache.cassandra.tcm.membership.NodeId;
@@ -1139,15 +1139,12 @@ public class Paxos
                     List<Message<IReadResponse>> responses = success.responses;
 
                     // There should be only a single response from the coordinator that was selected to do the tracked read
-                    Boolean isTracked = responses.get(0).payload.kind().isTracked();
+                    boolean isTracked = responses.get(0).payload.kind().isTracked();
 
-                    // Only enable read repair for PaxosV2 if mutation tracking and witnesses are enabled resulting in non-data responses
                     PartitionIterator result = null;
                     boolean hadShortRead = false;
                     if (isTracked)
                     {
-                        // Dummy responses are embedded in prepare response so Paxos can count responses like it does with
-                        // non-tracked reads
                         for (Message<IReadResponse> response : responses)
                         {
                             if (response.payload.kind() == Kind.TRACKED_DATA)
