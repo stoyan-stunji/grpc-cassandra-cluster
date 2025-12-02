@@ -394,7 +394,7 @@ public class ASTGenerators
 
     public static class MutationGenBuilder
     {
-        public enum DeleteKind { Partition, Row, Column }
+        public enum DeleteKind { Partition, Row, Column, RANGE }
         private final TableMetadata metadata;
         private final LinkedHashSet<Symbol> allColumns;
         private final LinkedHashSet<Symbol> partitionColumns, clusteringColumns;
@@ -883,6 +883,9 @@ public class ASTGenerators
                                     }
                                 }
                                 break;
+                            case RANGE:
+                                valueRange(rnd, columnExpressions, builder, clusteringColumns, clusteringValueGen);
+                                break;
                             default:
                                 throw new UnsupportedOperationException();
                         }
@@ -957,6 +960,68 @@ public class ASTGenerators
                 }
             };
         }
+
+        private enum rangeType {UNBOUD, BOUND , BETWEEN}
+        private static final Gen<Conditional.Where.Inequality> RANGE_INEQUALITY_GEN = SourceDSL.arbitrary().pick(Conditional.Where.Inequality.GREATER_THAN_EQ,
+                                                                                                                 Conditional.Where.Inequality.GREATER_THAN,
+                                                                                                                 Conditional.Where.Inequality.LESS_THAN_EQ,
+                                                                                                                 Conditional.Where.Inequality.LESS_THAN);
+
+        private static final Gen<Conditional.Where.Inequality> LOWER_BOUND_GEN = SourceDSL.arbitrary().pick(Conditional.Where.Inequality.GREATER_THAN,
+                                                                                                            Conditional.Where.Inequality.GREATER_THAN_EQ);
+
+        private static final Gen<Conditional.Where.Inequality> UPPER_BOUND_GEN = SourceDSL.arbitrary().pick(Conditional.Where.Inequality.LESS_THAN,
+                                                                                                            Conditional.Where.Inequality.LESS_THAN_EQ);
+
+
+        private void valueRange(RandomnessSource rnd,
+                                Map<Symbol, ExpressionBuilder> columnExpressions,
+                                Conditional.ConditionalBuilder<?> builder,
+                                LinkedHashSet<Symbol> columns,
+                                @Nullable Gen <? extends Map<Symbol, Object>> gen)
+        {
+            if (gen != null)
+                throw new UnsupportedOperationException("TODO: add support later... fine to ignore for now");
+
+            List<Symbol> columnList = new ArrayList<>(columns);
+            boolean priorKeysFullyConstrained = true;
+
+            for (int i = 0; i < columnList.size(); i++)
+            {
+                Symbol s = columnList.get(i);
+                Gen<Expression> expressionGen = columnExpressions.get(s).build();
+
+                if (!priorKeysFullyConstrained)
+                {
+                    builder.where(s, Conditional.Where.Inequality.EQUAL, expressionGen.generate(rnd));
+                    continue;
+                }
+
+                switch (SourceDSL.arbitrary().enumValues(rangeType.class).generate(rnd))
+                {
+                    case UNBOUD:
+                        builder.where(s, RANGE_INEQUALITY_GEN.generate(rnd), expressionGen.generate(rnd));
+                        priorKeysFullyConstrained = false;
+                        break;
+
+                    case BOUND:
+                        builder.where(s, LOWER_BOUND_GEN.generate(rnd), expressionGen.generate(rnd));
+                        builder.where(s, UPPER_BOUND_GEN.generate(rnd), expressionGen.generate(rnd));
+                        priorKeysFullyConstrained = false;
+                        break;
+
+                    case BETWEEN:
+                        builder.between(s, expressionGen.generate(rnd), expressionGen.generate(rnd));
+                        priorKeysFullyConstrained = false;
+                        break;
+
+                    default:
+                        throw new UnsupportedOperationException("Unsupported rangeType");
+                }
+            }
+
+        }
+
 
         private void generateRemaining(RandomnessSource rnd,
                                        Gen<Boolean> bool,
