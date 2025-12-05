@@ -55,7 +55,6 @@ import org.apache.cassandra.db.partitions.PartitionUpdate;
 import org.apache.cassandra.db.rows.RowIterator;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.exceptions.CasWriteTimeoutException;
-import org.apache.cassandra.exceptions.ExceptionCode;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.exceptions.IsBootstrappingException;
 import org.apache.cassandra.exceptions.ReadFailureException;
@@ -646,7 +645,9 @@ public class Paxos
             if (isFailure)
             {
                 mark(isWrite, m -> m.failures, consistency);
-                throw serverError != null ? new RequestFailureException(ExceptionCode.SERVER_ERROR, serverError, consistency, successes, required, failures)
+                throw serverError != null ? (isWrite
+                                            ? new WriteFailureException(consistency, successes, required, WriteType.CAS, failures)
+                                            : new ReadFailureException(serverError, consistency, successes, required, false, failures, null))
                                           : isWrite
                                             ? new WriteFailureException(consistency, successes, required, WriteType.CAS, failures)
                                             : new ReadFailureException(consistency, successes, required, false, failures);

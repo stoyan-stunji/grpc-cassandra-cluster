@@ -62,12 +62,28 @@ public class TxnReferenceOperations
         if (this == o) return true;
         if (o == null || getClass() != o.getClass()) return false;
         TxnReferenceOperations that = (TxnReferenceOperations) o;
-        return metadata.equals(that.metadata) && Objects.equals(clustering, that.clustering) && regulars.equals(that.regulars) && statics.equals(that.statics);
+
+        // Special case: EMPTY singleton matches any other empty instance
+        if ((this.metadata == null && this.isEmpty() && that.isEmpty()) ||
+            (that.metadata == null && that.isEmpty() && this.isEmpty()))
+            return true;
+
+        // Otherwise, use strict comparison including metadata
+        return Objects.equals(metadata, that.metadata) &&
+               Objects.equals(clustering, that.clustering) &&
+               regulars.equals(that.regulars) &&
+               statics.equals(that.statics);
     }
 
     @Override
     public int hashCode()
     {
+        // ALL empty instances (regardless of metadata) get the same hash code
+        // to match the equals() behavior
+        if (isEmpty())
+            return Objects.hash("EMPTY_SINGLETON");
+
+        // Only non-empty instances include metadata in hash
         return Objects.hash(metadata, clustering, regulars, statics);
     }
 
@@ -85,6 +101,25 @@ public class TxnReferenceOperations
     public boolean isEmpty()
     {
         return regulars.isEmpty() && statics.isEmpty();
+    }
+
+    /**
+     * Public accessors for CAS forwarding serialization support.
+     * These enable reuse of TxnReferenceOperations structure without exposing internal implementation.
+     */
+    public Clustering<?> getClustering()
+    {
+        return clustering;
+    }
+
+    public List<TxnReferenceOperation> getRegulars()
+    {
+        return regulars;
+    }
+
+    public List<TxnReferenceOperation> getStatics()
+    {
+        return statics;
     }
 
     static final ParameterisedVersionedSerializer<TxnReferenceOperations, TableMetadatas, Version> serializer = new ParameterisedVersionedSerializer<>()

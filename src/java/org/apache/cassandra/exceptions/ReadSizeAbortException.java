@@ -18,9 +18,12 @@
 
 package org.apache.cassandra.exceptions;
 
+import java.io.IOException;
+import java.util.HashMap;
 import java.util.Map;
 
 import org.apache.cassandra.db.ConsistencyLevel;
+import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.locator.InetAddressAndPort;
 
 public class ReadSizeAbortException extends ReadAbortException
@@ -28,5 +31,32 @@ public class ReadSizeAbortException extends ReadAbortException
     public ReadSizeAbortException(String msg, ConsistencyLevel consistency, int received, int blockFor, boolean dataPresent, Map<InetAddressAndPort, RequestFailureReason> failureReasonByEndpoint)
     {
         super(msg, consistency, received, blockFor, dataPresent, failureReasonByEndpoint);
+    }
+
+    static ReadSizeAbortException deserializeFields(String message, DataInputPlus in, int version) throws IOException
+    {
+        ConsistencyLevel consistency = ConsistencyLevel.fromCode(in.readUnsignedByte());
+        int received = in.readInt();
+        int blockFor = in.readInt();
+
+        // Deserialize failure reason map
+        int mapSize = in.readInt();
+        Map<InetAddressAndPort, RequestFailureReason> failures = new HashMap<>(mapSize);
+        for (int i = 0; i < mapSize; i++)
+        {
+            InetAddressAndPort endpoint = InetAddressAndPort.Serializer.inetAddressAndPortSerializer.deserialize(in, version);
+            RequestFailureReason reason = RequestFailureReason.fromCode(in.readShort());
+            failures.put(endpoint, reason);
+        }
+
+        boolean dataPresent = in.readBoolean();
+
+        return new ReadSizeAbortException(message, consistency, received, blockFor, dataPresent, failures);
+    }
+
+    @Override
+    public CassandraExceptionCode getCassandraExceptionCode()
+    {
+        return CassandraExceptionCode.READ_SIZE_ABORT;
     }
 }

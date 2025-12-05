@@ -17,11 +17,16 @@
  */
 package org.apache.cassandra.exceptions;
 
+import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
 
 import org.apache.cassandra.cql3.functions.Function;
 import org.apache.cassandra.cql3.functions.FunctionName;
+import org.apache.cassandra.db.TypeSizes;
 import org.apache.cassandra.db.marshal.AbstractType;
+import org.apache.cassandra.io.util.DataInputPlus;
+import org.apache.cassandra.io.util.DataOutputPlus;
 
 public class FunctionExecutionException extends RequestExecutionException
 {
@@ -49,5 +54,65 @@ public class FunctionExecutionException extends RequestExecutionException
         this.functionName = functionName;
         this.argTypes = argTypes;
         this.detail = msg;
+    }
+
+    @Override
+    protected void serializeSpecificFields(DataOutputPlus out, int version) throws IOException
+    {
+        // Serialize FunctionName
+        out.writeBoolean(functionName.keyspace != null);
+        if (functionName.keyspace != null)
+            out.writeUTF(functionName.keyspace);
+        out.writeUTF(functionName.name);
+
+        // Serialize argTypes list
+        out.writeInt(argTypes.size());
+        for (String argType : argTypes)
+            out.writeUTF(argType);
+
+        // Serialize detail
+        out.writeUTF(detail);
+    }
+
+    @Override
+    protected long serializedSizeSpecificFields(int version)
+    {
+        long size = TypeSizes.BOOL_SIZE; // keyspace present flag
+        if (functionName.keyspace != null)
+            size += TypeSizes.sizeof(functionName.keyspace);
+        size += TypeSizes.sizeof(functionName.name);
+
+        size += TypeSizes.INT_SIZE; // argTypes list size
+        for (String argType : argTypes)
+            size += TypeSizes.sizeof(argType);
+
+        size += TypeSizes.sizeof(detail);
+        return size;
+    }
+
+    static FunctionExecutionException deserializeFields(String message, DataInputPlus in, int version) throws IOException
+    {
+        // Deserialize FunctionName
+        boolean hasKeyspace = in.readBoolean();
+        String keyspace = hasKeyspace ? in.readUTF() : null;
+        String name = in.readUTF();
+        FunctionName functionName = new FunctionName(keyspace, name);
+
+        // Deserialize argTypes list
+        int argTypesSize = in.readInt();
+        List<String> argTypes = new ArrayList<>(argTypesSize);
+        for (int i = 0; i < argTypesSize; i++)
+            argTypes.add(in.readUTF());
+
+        // Deserialize detail
+        String detail = in.readUTF();
+
+        return new FunctionExecutionException(functionName, argTypes, detail);
+    }
+
+    @Override
+    public CassandraExceptionCode getCassandraExceptionCode()
+    {
+        return CassandraExceptionCode.FUNCTION_FAILURE;
     }
 }

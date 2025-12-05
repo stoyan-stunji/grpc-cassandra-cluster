@@ -18,12 +18,19 @@
 
 package org.apache.cassandra.db.guardrails;
 
+import org.apache.cassandra.exceptions.CassandraExceptionCode;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 
 public class GuardrailViolatedException extends InvalidRequestException
 {
-    GuardrailViolatedException(String message)
+    public GuardrailViolatedException(String message)
     {
         super(message);
+    }
+
+    @Override
+    public CassandraExceptionCode getCassandraExceptionCode()
+    {
+        return CassandraExceptionCode.GUARDRAIL_VIOLATED;
     }
 }

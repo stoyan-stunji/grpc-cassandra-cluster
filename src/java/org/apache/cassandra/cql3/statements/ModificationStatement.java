@@ -699,10 +699,10 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
                     type.isUpdate()? "updates" : "deletions");
 
         Clustering<?> clustering = Iterables.getOnlyElement(createClustering(options, clientState));
-        CQL3CasRequest request = new CQL3CasRequest(metadata(), key, conditionColumns(), updatesRegularRows(), updatesStaticRow(), requestTime);
+        CQL3CasRequest request = new CQL3CasRequest(metadata(), key, conditionColumns(), updatesRegularRows(), updatesStaticRow());
 
         addConditions(clustering, request, options);
-        request.addRowUpdate(clustering, this, options, timestamp, nowInSeconds);
+        request.addWriteFragment(this, options, clientState);
 
         return request;
     }

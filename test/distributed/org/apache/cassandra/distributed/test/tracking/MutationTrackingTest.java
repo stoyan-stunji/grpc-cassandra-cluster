@@ -443,4 +443,22 @@ public class MutationTrackingTest extends TestBaseImpl
             });
         }
     }
+
+    /**
+     * TODO: Add integration test that verifies CassandraExceptions are correctly
+     * serialized and forwarded through the CAS_FORWARD_REQ/RSP and
+     * CONSENSUS_READ_FORWARD_REQ/RSP message paths.
+     *
+     * This test should:
+     * 1. Set up a tracked keyspace
+     * 2. Trigger a CAS or consensus read from a non-replica coordinator
+     * 3. Force an exception on the replica coordinator (e.g., via byteman or other means)
+     * 4. Verify the exception is correctly forwarded back to the original coordinator
+     * 5. Verify the exception reaches the client with correct type and message
+     */
+    @Test
+    public void testExceptionForwardingDuringCasAndConsensusRead()
+    {
+        // TODO: Implement this test
+    }
 }

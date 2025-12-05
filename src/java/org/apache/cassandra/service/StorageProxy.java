@@ -63,6 +63,7 @@ import org.apache.cassandra.config.AccordSpec;
 import org.apache.cassandra.config.CassandraRelevantProperties;
 import org.apache.cassandra.config.Config;
 import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.cql3.statements.CQL3CasRequest;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.db.CounterMutation;
@@ -94,6 +95,7 @@ import org.apache.cassandra.dht.AbstractBounds;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.exceptions.CasWriteTimeoutException;
 import org.apache.cassandra.exceptions.CasWriteUnknownResultException;
+import org.apache.cassandra.exceptions.CassandraException;
 import org.apache.cassandra.exceptions.CoordinatorBehindException;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.exceptions.IsBootstrappingException;
@@ -110,6 +112,7 @@ import org.apache.cassandra.exceptions.UnavailableException;
 import org.apache.cassandra.exceptions.WriteFailureException;
 import org.apache.cassandra.exceptions.WriteTimeoutException;
 import org.apache.cassandra.gms.Gossiper;
+import org.apache.cassandra.gms.FailureDetector;
 import org.apache.cassandra.hints.Hint;
 import org.apache.cassandra.hints.HintsService;
 import org.apache.cassandra.locator.AbstractReplicationStrategy;
@@ -164,7 +167,11 @@ import org.apache.cassandra.service.consensus.migration.ConsensusRequestRouter.C
 import org.apache.cassandra.service.consensus.migration.ConsensusRequestRouter.SplitReads;
 import org.apache.cassandra.service.consensus.migration.TransactionalMigrationFromMode;
 import org.apache.cassandra.service.paxos.Ballot;
+import org.apache.cassandra.service.paxos.CasForwardRequest;
+import org.apache.cassandra.service.paxos.CasForwardResponse;
 import org.apache.cassandra.service.paxos.Commit;
+import org.apache.cassandra.service.paxos.ConsensusReadForwardRequest;
+import org.apache.cassandra.service.paxos.ConsensusReadForwardResponse;
 import org.apache.cassandra.service.paxos.ContentionStrategy;
 import org.apache.cassandra.service.paxos.Paxos;
 import org.apache.cassandra.service.paxos.PaxosCommitForwardRequest;
@@ -215,6 +222,7 @@ import static org.apache.cassandra.metrics.ClientRequestsMetricsHolder.writeMetr
 import static org.apache.cassandra.net.Message.out;
 import static org.apache.cassandra.net.NoPayload.noPayload;
 import static org.apache.cassandra.net.Verb.BATCH_STORE_REQ;
+import static org.apache.cassandra.net.Verb.CONSENSUS_READ_FORWARD_REQ;
 import static org.apache.cassandra.net.Verb.MUTATION_REQ;
 import static org.apache.cassandra.net.Verb.PAXOS_COMMIT_REQ;
 import static org.apache.cassandra.net.Verb.PAXOS_COMMIT_FORWARD_REQ;
@@ -381,12 +389,54 @@ public class StorageProxy implements StorageProxyMBean
                                   Dispatcher.RequestTime requestTime)
     throws UnavailableException, IsBootstrappingException, RequestFailureException, RequestTimeoutException, InvalidRequestException, CasWriteUnknownResultException
     {
+        return casInternal(keyspaceName, cfName, key, request, consistencyForPaxos, consistencyForCommit,
+                          clientState, nowInSeconds, requestTime, false);
+    }
+
+    /**
+     * Version of cas called by handlers that have already received a forwarded request.
+     * This prevents infinite forwarding loops if the forwarding target is not actually a replica.
+     */
+    public static RowIterator casForwarded(String keyspaceName,
+                                           String cfName,
+                                           DecoratedKey key,
+                                           CASRequest request,
+                                           ConsistencyLevel consistencyForPaxos,
+                                           ConsistencyLevel consistencyForCommit,
+                                           ClientState clientState,
+                                           long nowInSeconds,
+                                           Dispatcher.RequestTime requestTime)
+    throws UnavailableException, IsBootstrappingException, RequestFailureException, RequestTimeoutException, InvalidRequestException, CasWriteUnknownResultException
+    {
+        return casInternal(keyspaceName, cfName, key, request, consistencyForPaxos, consistencyForCommit,
+                          clientState, nowInSeconds, requestTime, true);
+    }
+
+    private static RowIterator casInternal(String keyspaceName,
+                                           String cfName,
+                                           DecoratedKey key,
+                                           CASRequest request,
+                                           ConsistencyLevel consistencyForPaxos,
+                                           ConsistencyLevel consistencyForCommit,
+                                           ClientState clientState,
+                                           long nowInSeconds,
+                                           Dispatcher.RequestTime requestTime,
+                                           boolean alreadyForwarded)
+    throws UnavailableException, IsBootstrappingException, RequestFailureException, RequestTimeoutException, InvalidRequestException, CasWriteUnknownResultException
+    {
         if (DatabaseDescriptor.getPartitionDenylistEnabled() && DatabaseDescriptor.getDenylistWritesEnabled() && !partitionDenylist.isKeyPermitted(keyspaceName, cfName, key.getKey()))
         {
             denylistMetrics.incrementWritesRejected();
             throw new InvalidRequestException(String.format("Unable to CAS write to denylisted partition [0x%s] in %s/%s",
                                                             key, keyspaceName, cfName));
         }
+
+        // Check if this CAS operation needs to be forwarded to a replica coordinator for tracked keyspaces
+        RowIterator forwardResult = checkAndForwardCasIfNeeded(keyspaceName, cfName, key, request,
+                                                               consistencyForPaxos, consistencyForCommit,
+                                                               clientState, nowInSeconds, requestTime, alreadyForwarded);
+        if (forwardResult != null)
+            return forwardResult;
 
         ConsensusAttemptResult lastAttemptResult = null;
         do
@@ -2478,9 +2528,30 @@ private static ConsensusAttemptResult legacyCas(TableMetadata metadata,
                                                                     isForWrite);
     }
 
-    private static PartitionIterator readWithConsensus(SinglePartitionReadCommand.Group group, ConsistencyLevel consistencyLevel, Dispatcher.RequestTime requestTime)
+    public static PartitionIterator readWithConsensus(SinglePartitionReadCommand.Group group, ConsistencyLevel consistencyLevel, Dispatcher.RequestTime requestTime)
     throws InvalidRequestException, UnavailableException, ReadFailureException, ReadTimeoutException
     {
+        return readWithConsensusInternal(group, consistencyLevel, requestTime, false);
+    }
+
+    /**
+     * Version of readWithConsensus called by handlers that have already received a forwarded request.
+     * This prevents infinite forwarding loops if the forwarding target is not actually a replica.
+     */
+    public static PartitionIterator readWithConsensusForwarded(SinglePartitionReadCommand.Group group, ConsistencyLevel consistencyLevel, Dispatcher.RequestTime requestTime)
+    throws InvalidRequestException, UnavailableException, ReadFailureException, ReadTimeoutException
+    {
+        return readWithConsensusInternal(group, consistencyLevel, requestTime, true);
+    }
+
+    private static PartitionIterator readWithConsensusInternal(SinglePartitionReadCommand.Group group, ConsistencyLevel consistencyLevel, Dispatcher.RequestTime requestTime, boolean alreadyForwarded)
+    throws InvalidRequestException, UnavailableException, ReadFailureException, ReadTimeoutException
+    {
+        // Check if this consensus read needs to be forwarded to a replica coordinator for tracked keyspaces
+        PartitionIterator forwardResult = checkAndForwardConsensusReadIfNeeded(group, consistencyLevel, requestTime, alreadyForwarded);
+        if (forwardResult != null)
+            return forwardResult;
+
         ConsensusAttemptResult lastResult;
         do
         {
@@ -3831,6 +3902,16 @@ private static ConsensusAttemptResult legacyCas(TableMetadata metadata,
         {
             return new ConsensusAttemptResult(casResult, null, false);
         }
+
+        /**
+         * Get the CAS result row iterator.
+         * @return the CAS result, or null if this was not a CAS operation result
+         */
+        @Nullable
+        public RowIterator getCasResult()
+        {
+            return casResult;
+        }
     }
 
     @Override
@@ -4097,5 +4178,188 @@ private static ConsensusAttemptResult legacyCas(TableMetadata metadata,
     public void setClientRequestSizeMetricsEnabled(boolean enabled)
     {
         DatabaseDescriptor.setClientRequestSizeMetricsEnabled(enabled);
+    }
+
+    /**
+     * Check if a CAS operation needs to be forwarded to a replica coordinator for tracked keyspaces.
+     * Returns null if no forwarding is needed, or the result of the forwarded operation.
+     */
+    private static RowIterator checkAndForwardCasIfNeeded(String keyspaceName,
+                                                         String cfName,
+                                                         DecoratedKey key,
+                                                         CASRequest request,
+                                                         ConsistencyLevel consistencyForPaxos,
+                                                         ConsistencyLevel consistencyForCommit,
+                                                         ClientState clientState,
+                                                         long nowInSeconds,
+                                                         Dispatcher.RequestTime requestTime,
+                                                         boolean alreadyForwarded)
+    throws UnavailableException, RequestFailureException, RequestTimeoutException
+    {
+        // Get keyspace metadata to check if it's tracked
+        Keyspace keyspace = Keyspace.openIfExists(keyspaceName);
+        if (keyspace == null)
+            throw new KeyspaceNotDefinedException("Keyspace " + keyspaceName + " does not exist");
+
+        KeyspaceMetadata ksMetadata = keyspace.getMetadata();
+        if (!ksMetadata.params.replicationType.isTracked())
+            return null; // Not tracked, no forwarding needed
+
+        // Check if current coordinator is not a replica
+        Token tk = key.getToken();
+        EndpointsForToken allReplicas = ReplicaLayout.forTokenWriteLiveAndDown(ClusterMetadata.current(), keyspace, tk)
+                                                     .all();
+        EndpointsForToken liveReplicas = allReplicas.filter(FailureDetector.isReplicaAlive);
+
+        InetAddressAndPort localEndpoint = FBUtilities.getBroadcastAddressAndPort();
+        boolean isLocalReplica = allReplicas.contains(localEndpoint);
+
+        if (isLocalReplica)
+            return null; // Local node is a replica, no forwarding needed
+
+        // If this request was already forwarded to us and we're not a replica, something is wrong
+        if (alreadyForwarded)
+        {
+            logger.error("Received forwarded CAS for keyspace {} table {} key {} but local node {} is not a replica. Replicas are: {}",
+                        keyspaceName, cfName, key, localEndpoint, allReplicas);
+            Tracing.trace("ERROR: Received forwarded CAS but local node is not a replica");
+            throw new InvalidRequestException("Forwarded CAS received by non-replica node " + localEndpoint);
+        }
+
+        // Find best replica to forward to using proximity-based selection
+        if (liveReplicas.isEmpty())
+            throw new UnavailableException("No live replicas available for CAS forwarding", consistencyForPaxos, 1, 0);
+
+        // Sort by proximity and select the best coordinator
+        EndpointsForToken sortedReplicas = DatabaseDescriptor.getNodeProximity().sortedByProximity(localEndpoint, liveReplicas);
+        InetAddressAndPort replicaCoordinator = sortedReplicas.get(0).endpoint();
+
+        // Create forward request
+        CasForwardRequest forwardRequest = new CasForwardRequest(keyspaceName, cfName, key, (CQL3CasRequest) request,
+                                                               consistencyForPaxos, consistencyForCommit,
+                                                               clientState, nowInSeconds);
+        Message<CasForwardRequest> message = Message.out(Verb.CAS_FORWARD_REQ, forwardRequest);
+
+        try
+        {
+            // Send synchronous request to replica coordinator
+            Object responseObj = MessagingService.instance().sendWithResult(message, replicaCoordinator).get();
+            @SuppressWarnings("unchecked")
+            Message<CasForwardResponse> responseMessage = (Message<CasForwardResponse>) responseObj;
+            CasForwardResponse response = responseMessage.payload;
+
+            // Add warnings from forwarded operation to local ClientWarn
+            if (response.warnings != null)
+            {
+                for (String warning : response.warnings)
+                    ClientWarn.instance.warn(warning);
+            }
+
+            // Check if the forwarded operation had an exception
+            if (!response.isSuccess())
+                throw response.exception;
+
+            return response.result;
+        }
+        catch (CassandraException ce)
+        {
+            // Rethrow CassandraExceptions from the replica coordinator
+            throw ce;
+        }
+        catch (Exception e)
+        {
+            throw new RuntimeException("Failed to forward CAS operation to replica coordinator", e);
+        }
+    }
+
+    /**
+     * Check if a consensus read operation needs to be forwarded to a replica coordinator for tracked keyspaces.
+     * Returns null if no forwarding is needed, or the result of the forwarded operation.
+     */
+    private static PartitionIterator checkAndForwardConsensusReadIfNeeded(SinglePartitionReadCommand.Group group,
+                                                                         ConsistencyLevel consistencyLevel,
+                                                                         Dispatcher.RequestTime requestTime,
+                                                                         boolean alreadyForwarded)
+    throws UnavailableException, ReadFailureException, ReadTimeoutException
+    {
+        if (group.queries.isEmpty())
+            return null;
+
+        // Use the first command to determine keyspace and key for replica planning
+        SinglePartitionReadCommand firstCommand = group.queries.get(0);
+        String keyspaceName = firstCommand.metadata().keyspace;
+
+        // Get keyspace metadata to check if it's tracked
+        Keyspace keyspace = Keyspace.openIfExists(keyspaceName);
+        if (keyspace == null)
+            throw new KeyspaceNotDefinedException("Keyspace " + keyspaceName + " does not exist");
+
+        KeyspaceMetadata ksMetadata = keyspace.getMetadata();
+        if (!ksMetadata.params.replicationType.isTracked())
+            return null; // Not tracked, no forwarding needed
+
+        // Check if current coordinator is not a replica
+        Token tk = firstCommand.partitionKey().getToken();
+        EndpointsForToken allReplicas = ReplicaLayout.forTokenWriteLiveAndDown(ClusterMetadata.current(), keyspace, tk)
+                                                     .all();
+        EndpointsForToken liveReplicas = allReplicas.filter(FailureDetector.isReplicaAlive);
+
+        InetAddressAndPort localEndpoint = FBUtilities.getBroadcastAddressAndPort();
+        boolean isLocalReplica = allReplicas.contains(localEndpoint);
+
+        if (isLocalReplica)
+            return null; // Local node is a replica, no forwarding needed
+
+        // If this request was already forwarded to us and we're not a replica, something is wrong
+        if (alreadyForwarded)
+        {
+            logger.error("Received forwarded consensus read for keyspace {} key {} but local node {} is not a replica. Replicas are: {}",
+                        keyspaceName, firstCommand.partitionKey(), localEndpoint, allReplicas);
+            Tracing.trace("ERROR: Received forwarded consensus read but local node is not a replica");
+            throw new RuntimeException("Forwarded consensus read received by non-replica node " + localEndpoint);
+        }
+
+        // Find best replica to forward to using proximity-based selection
+        if (liveReplicas.isEmpty())
+            throw new UnavailableException("No live replicas available for consensus read forwarding", consistencyLevel, 1, 0);
+
+        // Sort by proximity and select the best coordinator
+        EndpointsForToken sortedReplicas = DatabaseDescriptor.getNodeProximity().sortedByProximity(localEndpoint, liveReplicas);
+        InetAddressAndPort replicaCoordinator = sortedReplicas.get(0).endpoint();
+
+        // Create forward request - consensus reads only have a single command
+        ConsensusReadForwardRequest forwardRequest = new ConsensusReadForwardRequest(firstCommand, consistencyLevel);
+        Message<ConsensusReadForwardRequest> message = Message.out(CONSENSUS_READ_FORWARD_REQ, forwardRequest);
+
+        try
+        {
+            // Send synchronous request to replica coordinator
+            Object responseObj = MessagingService.instance().sendWithResult(message, replicaCoordinator).get();
+            @SuppressWarnings("unchecked")
+            Message<ConsensusReadForwardResponse> responseMessage = (Message<ConsensusReadForwardResponse>) responseObj;
+            ConsensusReadForwardResponse response = responseMessage.payload;
+
+            // Add warnings from forwarded operation to local ClientWarn
+            if (response.warnings != null)
+            {
+                for (String warning : response.warnings)
+                    ClientWarn.instance.warn(warning);
+            }
+
+            // Check if the forwarded operation had an exception
+            if (!response.isSuccess())
+                throw response.exception;
+
+            return response.getResult();
+        }
+        catch (CassandraException ce)
+        {
+            // Rethrow CassandraExceptions from the replica coordinator
+            throw ce;
+        }
+        catch (Exception e)
+        {
+            throw new RuntimeException("Failed to forward consensus read operation to replica coordinator", e);
+        }
     }
 }

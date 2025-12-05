@@ -17,13 +17,14 @@
  */
 package org.apache.cassandra.cql3.statements;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.Objects;
 import java.util.TreeMap;
 
 import org.apache.commons.lang3.builder.ToStringBuilder;
@@ -35,7 +36,6 @@ import accord.api.Update;
 import accord.primitives.Keys;
 import accord.primitives.Txn;
 import org.apache.cassandra.cql3.QueryOptions;
-import org.apache.cassandra.cql3.UpdateParameters;
 import org.apache.cassandra.cql3.conditions.ColumnCondition;
 import org.apache.cassandra.db.Clustering;
 import org.apache.cassandra.db.Columns;
@@ -44,28 +44,32 @@ import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.ReadCommand.PotentialTxnConflicts;
 import org.apache.cassandra.db.RegularAndStaticColumns;
 import org.apache.cassandra.db.SinglePartitionReadCommand;
-import org.apache.cassandra.db.Slice;
 import org.apache.cassandra.db.Slices;
+import org.apache.cassandra.db.TypeSizes;
 import org.apache.cassandra.db.filter.ClusteringIndexNamesFilter;
 import org.apache.cassandra.db.filter.ClusteringIndexSliceFilter;
 import org.apache.cassandra.db.filter.ColumnFilter;
 import org.apache.cassandra.db.filter.DataLimits;
 import org.apache.cassandra.db.filter.RowFilter;
-import org.apache.cassandra.db.marshal.TimeUUIDType;
 import org.apache.cassandra.db.partitions.FilteredPartition;
-import org.apache.cassandra.db.partitions.Partition;
 import org.apache.cassandra.db.partitions.PartitionUpdate;
 import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.index.IndexRegistry;
+import org.apache.cassandra.io.IVersionedSerializer;
+import org.apache.cassandra.io.util.DataInputPlus;
+import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.schema.TableMetadata;
+import org.apache.cassandra.schema.TableId;
 import org.apache.cassandra.schema.TableParams;
+import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.service.CASRequest;
 import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.service.PreserveTimestamp;
 import org.apache.cassandra.service.accord.api.PartitionKey;
 import org.apache.cassandra.service.accord.serializers.TableMetadatas;
 import org.apache.cassandra.service.accord.serializers.TableMetadatasAndKeys;
+import org.apache.cassandra.service.accord.serializers.Version;
 import org.apache.cassandra.service.accord.txn.TxnCondition;
 import org.apache.cassandra.service.accord.txn.TxnData;
 import org.apache.cassandra.service.accord.txn.TxnDataKeyValue;
@@ -78,7 +82,6 @@ import org.apache.cassandra.service.accord.txn.TxnWrite;
 import org.apache.cassandra.service.paxos.Ballot;
 import org.apache.cassandra.tcm.ClusterMetadata;
 import org.apache.cassandra.transport.Dispatcher;
-import org.apache.cassandra.utils.TimeUUID;
 
 import static com.google.common.base.Preconditions.checkState;
 import static org.apache.cassandra.service.StorageProxy.ConsensusAttemptResult;
@@ -102,7 +105,6 @@ public class CQL3CasRequest implements CASRequest
     private final RegularAndStaticColumns conditionColumns;
     private final boolean updatesRegularRows;
     private final boolean updatesStaticRow;
-    private final Dispatcher.RequestTime requestTime;
     private boolean hasExists; // whether we have an exist or if not exist condition
 
     // Conditions on the static row. We keep it separate from 'conditions' as most things related to the static row are
@@ -113,15 +115,13 @@ public class CQL3CasRequest implements CASRequest
     //   2) this allows to detect when contradictory conditions are set (not exists with some other conditions on the same row)
     private final TreeMap<Clustering<?>, RowCondition> conditions;
 
-    private final List<RowUpdate> updates = new ArrayList<>();
-    private final List<RangeDeletion> rangeDeletions = new ArrayList<>();
+    private final List<TxnWrite.Fragment> writeFragments = new ArrayList<>();
 
     public CQL3CasRequest(TableMetadata metadata,
                           DecoratedKey key,
                           RegularAndStaticColumns conditionColumns,
                           boolean updatesRegularRows,
-                          boolean updatesStaticRow,
-                          Dispatcher.RequestTime requestTime)
+                          boolean updatesStaticRow)
     {
         this.metadata = metadata;
         this.key = key;
@@ -129,23 +129,22 @@ public class CQL3CasRequest implements CASRequest
         this.conditionColumns = conditionColumns;
         this.updatesRegularRows = updatesRegularRows;
         this.updatesStaticRow = updatesStaticRow;
-        this.requestTime = requestTime;
     }
 
     @Override
     public Dispatcher.RequestTime requestTime()
     {
-        return requestTime;
+        return Dispatcher.RequestTime.forImmediateExecution();
     }
 
-    void addRowUpdate(Clustering<?> clustering, ModificationStatement stmt, QueryOptions options, long timestamp, long nowInSeconds)
-    {
-        updates.add(new RowUpdate(clustering, stmt, options, timestamp, nowInSeconds));
-    }
 
-    void addRangeDeletion(Slice slice, ModificationStatement stmt, QueryOptions options, long timestamp, long nowInSeconds)
+    void addWriteFragment(ModificationStatement stmt, QueryOptions options, ClientState clientState)
     {
-        rangeDeletions.add(new RangeDeletion(slice, stmt, options, timestamp, nowInSeconds));
+        // Create TxnWrite.Fragment directly using existing pattern
+        PartitionKey partitionKey = new PartitionKey(metadata.id, key);
+        TxnWrite.Fragment fragment = stmt.forTxn().getTxnWriteFragment(
+            writeFragments.size(), clientState, options, partitionKey);
+        writeFragments.add(fragment);
     }
 
     public void addNotExist(Clustering<?> clustering) throws InvalidRequestException
@@ -287,109 +286,39 @@ public class CQL3CasRequest implements CASRequest
     private RegularAndStaticColumns updatedColumns()
     {
         RegularAndStaticColumns.Builder builder = RegularAndStaticColumns.builder();
-        for (RowUpdate upd : updates)
-            builder.addAll(upd.stmt.updatedColumns());
+        for (TxnWrite.Fragment fragment : writeFragments)
+        {
+            builder.addAll(fragment.baseUpdate.columns());
+            if (!fragment.referenceOps.isEmpty())
+            {
+                // Add columns from reference operations
+                fragment.referenceOps.getStatics().forEach(op -> builder.add(op.receiver()));
+                fragment.referenceOps.getRegulars().forEach(op -> builder.add(op.receiver()));
+            }
+        }
         return builder.build();
     }
 
     public PartitionUpdate makeUpdates(FilteredPartition current, ClientState clientState, Ballot ballot) throws InvalidRequestException
     {
-        PartitionUpdate.Builder updateBuilder = new PartitionUpdate.Builder(metadata, key, updatedColumns(), conditions.size());
-        long timeUuidNanos = 0;
-        for (RowUpdate upd : updates)
-            timeUuidNanos = upd.applyUpdates(current, updateBuilder, clientState, ballot.msb(), timeUuidNanos);
-        for (RangeDeletion upd : rangeDeletions)
-            upd.applyUpdates(current, updateBuilder, clientState);
+        if (writeFragments.isEmpty())
+            return PartitionUpdate.emptyUpdate(metadata, key);
+
+        PartitionUpdate.Builder updateBuilder = new PartitionUpdate.Builder(
+            metadata, key, updatedColumns(), writeFragments.size());
+
+        // Create TxnData from read results
+        TxnDataKeyValue txnDataValue = new TxnDataKeyValue(current.rowIterator(false));
+        TxnData txnData = TxnData.of(txnDataName(CAS_READ), txnDataValue);
+
+        for (TxnWrite.Fragment fragment : writeFragments)
+        {
+            fragment.completeToBuilder(updateBuilder, txnData, ballot, current, clientState);
+        }
 
         PartitionUpdate partitionUpdate = updateBuilder.build();
         IndexRegistry.obtain(metadata).validate(partitionUpdate, clientState);
-
         return partitionUpdate;
-    }
-
-    private static class CASUpdateParameters extends UpdateParameters
-    {
-        final long timeUuidMsb;
-        long timeUuidNanos;
-
-        public CASUpdateParameters(TableMetadata metadata, ClientState state, QueryOptions options, long timestamp, long nowInSec, int ttl, Map<DecoratedKey, Partition> prefetchedRows, long timeUuidMsb, long timeUuidNanos) throws InvalidRequestException
-        {
-            super(metadata, state, options, timestamp, nowInSec, ttl, prefetchedRows);
-            this.timeUuidMsb = timeUuidMsb;
-            this.timeUuidNanos = timeUuidNanos;
-        }
-
-        public byte[] nextTimeUUIDAsBytes()
-        {
-            return TimeUUID.toBytes(timeUuidMsb, TimeUUIDType.signedBytesToNativeLong(timeUuidNanos++));
-        }
-    }
-
-    /**
-     * Due to some operation on lists, we can't generate the update that a given Modification statement does before
-     * we get the values read by the initial read of Paxos. A RowUpdate thus just store the relevant information
-     * (include the statement iself) to generate those updates. We'll have multiple RowUpdate for a Batch, otherwise
-     * we'll have only one.
-     */
-    private class RowUpdate
-    {
-        private final Clustering<?> clustering;
-        private final ModificationStatement stmt;
-        private final QueryOptions options;
-        private final long timestamp;
-        private final long nowInSeconds;
-
-        private RowUpdate(Clustering<?> clustering, ModificationStatement stmt, QueryOptions options, long timestamp, long nowInSeconds)
-        {
-            this.clustering = clustering;
-            this.stmt = stmt;
-            this.options = options;
-            this.timestamp = timestamp;
-            this.nowInSeconds = nowInSeconds;
-        }
-
-        long applyUpdates(FilteredPartition current, PartitionUpdate.Builder updateBuilder, ClientState state, long timeUuidMsb, long timeUuidNanos)
-        {
-            Map<DecoratedKey, Partition> map = stmt.requiresRead() ? Collections.singletonMap(key, current) : null;
-            CASUpdateParameters params =
-                new CASUpdateParameters(metadata, state, options, timestamp, nowInSeconds,
-                                     stmt.getTimeToLive(options), map, timeUuidMsb, timeUuidNanos);
-            stmt.addUpdateForKey(updateBuilder, clustering, params);
-            return params.timeUuidNanos;
-        }
-    }
-
-    private class RangeDeletion
-    {
-        private final Slice slice;
-        private final ModificationStatement stmt;
-        private final QueryOptions options;
-        private final long timestamp;
-        private final long nowInSeconds;
-
-        private RangeDeletion(Slice slice, ModificationStatement stmt, QueryOptions options, long timestamp, long nowInSeconds)
-        {
-            this.slice = slice;
-            this.stmt = stmt;
-            this.options = options;
-            this.timestamp = timestamp;
-            this.nowInSeconds = nowInSeconds;
-        }
-
-        void applyUpdates(FilteredPartition current, PartitionUpdate.Builder updateBuilder, ClientState state)
-        {
-            // No slice statements currently require a read, but this maintains consistency with RowUpdate, and future proofs us
-            Map<DecoratedKey, Partition> map = stmt.requiresRead() ? Collections.singletonMap(key, current) : null;
-            UpdateParameters params =
-                new UpdateParameters(metadata,
-                                     state,
-                                     options,
-                                     timestamp,
-                                     nowInSeconds,
-                                     stmt.getTimeToLive(options),
-                                     map);
-            stmt.addUpdateForKey(updateBuilder, slice, params);
-        }
     }
 
     private static abstract class RowCondition
@@ -434,6 +363,21 @@ public class CQL3CasRequest implements CASRequest
             TxnReference txnReference = TxnReference.row(txnDataName(CAS_READ));
             return new TxnCondition.Exists(txnReference, TxnCondition.Kind.IS_NULL);
         }
+
+        @Override
+        public boolean equals(Object o)
+        {
+            if (this == o) return true;
+            if (o == null || getClass() != o.getClass()) return false;
+            NotExistCondition that = (NotExistCondition) o;
+            return Objects.equals(clustering, that.clustering);
+        }
+
+        @Override
+        public int hashCode()
+        {
+            return Objects.hash(clustering);
+        }
     }
 
     private static class ExistCondition extends RowCondition implements ToCQL
@@ -458,6 +402,21 @@ public class CQL3CasRequest implements CASRequest
         {
             TxnReference txnReference = TxnReference.row(txnDataName(CAS_READ));
             return new TxnCondition.Exists(txnReference, TxnCondition.Kind.IS_NOT_NULL);
+        }
+
+        @Override
+        public boolean equals(Object o)
+        {
+            if (this == o) return true;
+            if (o == null || getClass() != o.getClass()) return false;
+            ExistCondition that = (ExistCondition) o;
+            return Objects.equals(clustering, that.clustering);
+        }
+
+        @Override
+        public int hashCode()
+        {
+            return Objects.hash(clustering);
         }
     }
 
@@ -494,12 +453,53 @@ public class CQL3CasRequest implements CASRequest
         {
             return new TxnCondition.ColumnConditionsAdapter(clustering, conditions);
         }
+
+        @Override
+        public boolean equals(Object o)
+        {
+            if (this == o) return true;
+            if (o == null || getClass() != o.getClass()) return false;
+            ColumnsConditions that = (ColumnsConditions) o;
+            return Objects.equals(clustering, that.clustering) &&
+                   Objects.equals(conditions, that.conditions);
+        }
+
+        @Override
+        public int hashCode()
+        {
+            return Objects.hash(clustering, conditions);
+        }
     }
     
     @Override
     public String toString()
     {
         return ToStringBuilder.reflectionToString(this, ToStringStyle.SHORT_PREFIX_STYLE);
+    }
+
+    @Override
+    public boolean equals(Object o)
+    {
+        if (this == o) return true;
+        if (o == null || getClass() != o.getClass()) return false;
+
+        CQL3CasRequest that = (CQL3CasRequest) o;
+        return updatesRegularRows == that.updatesRegularRows &&
+               updatesStaticRow == that.updatesStaticRow &&
+               hasExists == that.hasExists &&
+               Objects.equals(metadata.id, that.metadata.id) && // Compare table IDs instead of full metadata
+               Objects.equals(key, that.key) &&
+               Objects.equals(conditionColumns, that.conditionColumns) &&
+               Objects.equals(staticConditions, that.staticConditions) &&
+               Objects.equals(conditions, that.conditions) &&
+               Objects.equals(writeFragments, that.writeFragments);
+    }
+
+    @Override
+    public int hashCode()
+    {
+        return Objects.hash(metadata.id, key, conditionColumns, updatesRegularRows, updatesStaticRow,
+                           hasExists, staticConditions, conditions, writeFragments);
     }
 
     @Override
@@ -529,7 +529,7 @@ public class CQL3CasRequest implements CASRequest
         TableParams tableParams = tableMetadata.params;
         commitConsistencyLevel = tableParams.transactionalMode.commitCLForMode(tableParams.transactionalMigrationFrom, commitConsistencyLevel, cm, tableMetadata.id, key.getToken());
         // CAS requires using the new txn timestamp to correctly linearize some kinds of updates
-        return new TxnUpdate(tables, createWriteFragments(clientState), createCondition(), commitConsistencyLevel, PreserveTimestamp.no);
+        return new TxnUpdate(tables, writeFragments, createCondition(), commitConsistencyLevel, PreserveTimestamp.no);
     }
 
     private TxnCondition createCondition()
@@ -546,31 +546,6 @@ public class CQL3CasRequest implements CASRequest
         return conditions.size() == 1 ? txnConditions.get(0) : new TxnCondition.BooleanGroup(TxnCondition.Kind.AND, txnConditions);
     }
 
-    private List<TxnWrite.Fragment> createWriteFragments(ClientState state)
-    {
-        PartitionKey partitionKey = new PartitionKey(metadata.id, key);
-        List<TxnWrite.Fragment> fragments = new ArrayList<>();
-        int idx = 0;
-        for (RowUpdate update : updates)
-        {
-            // Some operations may need to migrate to run in the transaction, so need to call forTxn to make sure this
-            // happens.
-            // see CASSANDRA-18337
-            ModificationStatement modification = update.stmt.forTxn();
-            QueryOptions options = update.options;
-            TxnWrite.Fragment fragment = modification.getTxnWriteFragment(idx++, state, options, partitionKey);
-            fragments.add(fragment);
-        }
-        for (RangeDeletion rangeDeletion : rangeDeletions)
-        {
-            ModificationStatement modification = rangeDeletion.stmt;
-            QueryOptions options = rangeDeletion.options;
-            TxnWrite.Fragment fragment = modification.getTxnWriteFragment(idx++, state, options, partitionKey);
-            fragments.add(fragment);
-        }
-        return fragments;
-    }
-
     @Override
     public ConsensusAttemptResult toCasResult(TxnResult txnResult)
     {
@@ -579,5 +554,232 @@ public class CQL3CasRequest implements CASRequest
         TxnData txnData = (TxnData)txnResult;
         TxnDataKeyValue partition = (TxnDataKeyValue)txnData.get(txnDataName(CAS_READ));
         return casResult(partition != null ? partition.rowIterator(false) : null);
+    }
+
+    /**
+     * IVersionedSerializer for CQL3CasRequest to enable CAS forwarding between coordinators.
+     *
+     */
+    public static class Serializer implements IVersionedSerializer<CQL3CasRequest>
+    {
+        public static final Serializer instance = new Serializer();
+
+        @Override
+        public void serialize(CQL3CasRequest request, DataOutputPlus out, int version) throws IOException
+        {
+            // Serialize table metadata using compact form
+            request.metadata.id.serializeCompact(out);
+
+            // Serialize partition key
+            DecoratedKey.serializer.serialize(request.key, out, version);
+
+            // Serialize condition columns - serialize statics and regulars separately
+            Columns.serializer.serialize(request.conditionColumns.statics, out);
+            Columns.serializer.serialize(request.conditionColumns.regulars, out);
+
+            // Serialize boolean flags as bit field
+            byte flags = (byte) ((request.updatesRegularRows ? 0x01 : 0) |
+                                (request.updatesStaticRow ? 0x02 : 0) |
+                                (request.hasExists ? 0x04 : 0));
+            out.writeByte(flags);
+
+            // Serialize static conditions (nullable RowCondition)
+            serializeRowCondition(request.staticConditions, out, version);
+
+            // Serialize conditions map
+            out.writeUnsignedVInt32(request.conditions.size());
+            for (Map.Entry<Clustering<?>, RowCondition> entry : request.conditions.entrySet())
+            {
+                Clustering.serializer.serialize(entry.getKey(), out, version, request.metadata.comparator.subtypes());
+                serializeRowCondition(entry.getValue(), out, version);
+            }
+
+            // Serialize write fragments (replaces updates and range deletions)
+            out.writeUnsignedVInt32(request.writeFragments.size());
+            TableMetadatas tableMetadatas = TableMetadatas.of(request.metadata);
+            for (TxnWrite.Fragment fragment : request.writeFragments)
+            {
+                TxnWrite.Fragment.serializer.serialize(fragment, tableMetadatas, out, Version.findBestMatchForMessagingVersion(version));
+            }
+        }
+
+        @Override
+        public CQL3CasRequest deserialize(DataInputPlus in, int version) throws IOException
+        {
+            // Deserialize table metadata
+            TableId tableId = TableId.deserializeCompact(in);
+            TableMetadata metadata = Schema.instance.getTableMetadata(tableId);
+            if (metadata == null)
+                throw new IOException("Unknown table ID in CQL3CasRequest deserialization: " + tableId);
+
+            // Deserialize partition key
+            DecoratedKey key = (DecoratedKey) DecoratedKey.serializer.deserialize(in, version);
+
+            // Deserialize condition columns
+            Columns statics = Columns.serializer.deserialize(in, metadata);
+            Columns regulars = Columns.serializer.deserialize(in, metadata);
+            RegularAndStaticColumns conditionColumns = new RegularAndStaticColumns(statics, regulars);
+
+            // Deserialize flags
+            byte flags = in.readByte();
+            boolean updatesRegularRows = (flags & 0x01) != 0;
+            boolean updatesStaticRow = (flags & 0x02) != 0;
+            boolean hasExists = (flags & 0x04) != 0;
+
+            // Create the CQL3CasRequest
+            CQL3CasRequest request = new CQL3CasRequest(metadata, key, conditionColumns,
+                                                      updatesRegularRows, updatesStaticRow);
+            request.hasExists = hasExists;
+
+            // Deserialize static conditions
+            request.staticConditions = deserializeRowCondition(in, version, metadata, Clustering.STATIC_CLUSTERING);
+
+            // Deserialize conditions map
+            int conditionsCount = in.readUnsignedVInt32();
+            for (int i = 0; i < conditionsCount; i++)
+            {
+                Clustering<?> clustering = Clustering.serializer.deserialize(in, version, metadata.comparator.subtypes());
+                RowCondition condition = deserializeRowCondition(in, version, metadata, clustering);
+                request.conditions.put(clustering, condition);
+            }
+
+            // Deserialize write fragments
+            int fragmentCount = in.readUnsignedVInt32();
+            TableMetadatas tableMetadatas = TableMetadatas.of(metadata);
+            for (int i = 0; i < fragmentCount; i++)
+            {
+                PartitionKey partitionKey = new PartitionKey(metadata.id, request.key);
+                TxnWrite.Fragment fragment = TxnWrite.Fragment.serializer.deserialize(partitionKey, tableMetadatas, in, Version.findBestMatchForMessagingVersion(version));
+                request.writeFragments.add(fragment);
+            }
+
+            return request;
+        }
+
+        @Override
+        public long serializedSize(CQL3CasRequest request, int version)
+        {
+            long size = 0;
+
+            // Table metadata (compact form)
+            size += request.metadata.id.serializedCompactSize();
+
+            // Partition key
+            size += DecoratedKey.serializer.serializedSize(request.key, version);
+
+            // Condition columns - statics and regulars separately
+            size += Columns.serializer.serializedSize(request.conditionColumns.statics);
+            size += Columns.serializer.serializedSize(request.conditionColumns.regulars);
+
+            // Flags byte
+            size += 1;
+
+            // Static conditions
+            size += rowConditionSize(request.staticConditions, version);
+
+            // Conditions map
+            size += TypeSizes.sizeofUnsignedVInt(request.conditions.size());
+            for (Map.Entry<Clustering<?>, RowCondition> entry : request.conditions.entrySet())
+            {
+                size += Clustering.serializer.serializedSize(entry.getKey(), version, request.metadata.comparator.subtypes());
+                size += rowConditionSize(entry.getValue(), version);
+            }
+
+            // Write fragments (replaces updates and range deletions)
+            size += TypeSizes.sizeofUnsignedVInt(request.writeFragments.size());
+            for (TxnWrite.Fragment fragment : request.writeFragments)
+            {
+                size += TxnWrite.Fragment.serializer.serializedSize(fragment, TableMetadatas.of(request.metadata), Version.findBestMatchForMessagingVersion(version));
+            }
+
+            return size;
+        }
+
+        // Helper methods for RowCondition serialization
+        private void serializeRowCondition(RowCondition condition, DataOutputPlus out, int version) throws IOException
+        {
+            if (condition == null)
+            {
+                out.writeByte(0); // NULL_TYPE
+                return;
+            }
+
+            if (condition instanceof NotExistCondition)
+            {
+                out.writeByte(1); // NOT_EXIST_TYPE
+                // Don't serialize clustering here - it's already serialized in the conditions map
+            }
+            else if (condition instanceof ExistCondition)
+            {
+                out.writeByte(2); // EXIST_TYPE
+                // Don't serialize clustering here - it's already serialized in the conditions map
+            }
+            else if (condition instanceof ColumnsConditions)
+            {
+                out.writeByte(3); // COLUMNS_CONDITIONS_TYPE
+                ColumnsConditions cc = (ColumnsConditions) condition;
+                out.writeUnsignedVInt32(cc.conditions.size());
+
+                // Serialize each ColumnCondition.Bound using adapted pattern
+                for (ColumnCondition.Bound bound : cc.conditions)
+                {
+                    ColumnCondition.Bound.serializer.serialize(bound, TableMetadatas.of(bound.table), out);
+                }
+            }
+            else
+            {
+                throw new IOException("Unknown RowCondition type: " + condition.getClass());
+            }
+        }
+
+        private RowCondition deserializeRowCondition(DataInputPlus in, int version, TableMetadata metadata, Clustering<?> clustering) throws IOException
+        {
+            byte type = in.readByte();
+            switch (type)
+            {
+                case 0: // NULL_TYPE
+                    return null;
+                case 1: // NOT_EXIST_TYPE
+                    return new NotExistCondition(clustering);
+                case 2: // EXIST_TYPE
+                    return new ExistCondition(clustering);
+                case 3: // COLUMNS_CONDITIONS_TYPE
+                    int conditionsCount = in.readUnsignedVInt32();
+                    ColumnsConditions columnsConditions = new ColumnsConditions(clustering);
+
+                    // Deserialize each ColumnCondition.Bound
+                    for (int i = 0; i < conditionsCount; i++)
+                    {
+                        ColumnCondition.Bound bound = ColumnCondition.Bound.serializer.deserialize(TableMetadatas.of(metadata), in);
+                        columnsConditions.conditions.add(bound);
+                    }
+
+                    return columnsConditions;
+                default:
+                    throw new IOException("Unknown RowCondition type: " + type);
+            }
+        }
+
+        private long rowConditionSize(RowCondition condition, int version)
+        {
+            if (condition == null)
+                return 1; // type byte
+
+            long size = 1; // type byte
+
+            if (condition instanceof ColumnsConditions)
+            {
+                ColumnsConditions cc = (ColumnsConditions) condition;
+                size += TypeSizes.sizeofUnsignedVInt(cc.conditions.size());
+                // Calculate size for each ColumnCondition.Bound
+                for (ColumnCondition.Bound bound : cc.conditions)
+                {
+                    size += ColumnCondition.Bound.serializer.serializedSize(bound, TableMetadatas.of(bound.table));
+                }
+            }
+
+            return size;
+        }
+
     }
 }

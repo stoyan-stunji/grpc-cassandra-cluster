@@ -117,8 +117,14 @@ import org.apache.cassandra.service.accord.serializers.SetDurableSerializers;
 import org.apache.cassandra.service.accord.serializers.Version;
 import org.apache.cassandra.service.consensus.migration.ConsensusKeyMigrationState;
 import org.apache.cassandra.service.consensus.migration.ConsensusKeyMigrationState.ConsensusKeyMigrationFinished;
+import org.apache.cassandra.service.paxos.CasForwardHandler;
+import org.apache.cassandra.service.paxos.CasForwardRequest;
+import org.apache.cassandra.service.paxos.CasForwardResponse;
 import org.apache.cassandra.service.paxos.Commit;
 import org.apache.cassandra.service.paxos.Commit.Agreed;
+import org.apache.cassandra.service.paxos.ConsensusReadForwardHandler;
+import org.apache.cassandra.service.paxos.ConsensusReadForwardRequest;
+import org.apache.cassandra.service.paxos.ConsensusReadForwardResponse;
 import org.apache.cassandra.service.paxos.Paxos2CommitForwardHandler;
 import org.apache.cassandra.service.paxos.Paxos2CommitForwardRequest;
 import org.apache.cassandra.service.paxos.PaxosCommit;
@@ -310,6 +316,12 @@ public enum Verb
     PAXOS2_UPDATE_LOW_BALLOT_REQ     (64, P2, repairTimeout, PAXOS_REPAIR,      () -> PaxosUpdateLowBallot.serializer,         () -> PaxosUpdateLowBallot.verbHandler,                      PAXOS2_UPDATE_LOW_BALLOT_RSP     ),
     PAXOS2_COMMIT_FORWARD_RSP (71, P2, writeTimeout, REQUEST_RESPONSE,  () -> NoPayload.serializer,                 RESPONSE_HANDLER                             ),
     PAXOS2_COMMIT_FORWARD_REQ (72,  P2, writeTimeout, MUTATION,          () -> Paxos2CommitForwardRequest.serializer, () -> Paxos2CommitForwardHandler.instance, PAXOS2_COMMIT_FORWARD_RSP ),
+
+    // CAS and consensus read forwarding for tracked keyspaces
+    CAS_FORWARD_RSP           (73,  P2, writeTimeout, REQUEST_RESPONSE,  () -> CasForwardResponse.serializer,         RESPONSE_HANDLER                             ),
+    CAS_FORWARD_REQ           (74,  P2, writeTimeout, MUTATION,          () -> CasForwardRequest.serializer,          () -> CasForwardHandler.instance,           CAS_FORWARD_RSP           ),
+    CONSENSUS_READ_FORWARD_RSP(75,  P2, readTimeout,  REQUEST_RESPONSE,  () -> ConsensusReadForwardResponse.serializer, RESPONSE_HANDLER                           ),
+    CONSENSUS_READ_FORWARD_REQ(76,  P2, readTimeout,  READ,              () -> ConsensusReadForwardRequest.serializer,() -> ConsensusReadForwardHandler.instance, CONSENSUS_READ_FORWARD_RSP),
 
     // transactional cluster metadata
     TCM_COMMIT_RSP         (801, P0, rpcTimeout,      INTERNAL_METADATA,    MessageSerializers::commitResultSerializer,         RESPONSE_HANDLER                                 ),
