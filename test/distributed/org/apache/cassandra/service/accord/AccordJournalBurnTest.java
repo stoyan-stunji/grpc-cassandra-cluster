@@ -24,7 +24,10 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 import javax.annotation.Nullable;
@@ -39,11 +42,16 @@ import accord.burn.SimulationException;
 import accord.impl.TopologyFactory;
 import accord.impl.basic.Cluster;
 import accord.impl.basic.RandomDelayQueue;
+import accord.local.Command;
+import accord.local.CommandStore;
 import accord.local.CommandStores;
+import accord.local.DurableBefore;
 import accord.local.Node;
+import accord.local.RedundantBefore;
 import accord.primitives.EpochSupplier;
 import accord.utils.DefaultRandom;
 import accord.utils.Invariants;
+import accord.utils.PersistentField;
 import accord.utils.RandomSource;
 import org.apache.cassandra.ServerTestUtils;
 import org.apache.cassandra.db.ColumnFamilyStore;
@@ -60,6 +68,7 @@ import org.apache.cassandra.dht.Murmur3Partitioner;
 import org.apache.cassandra.io.sstable.ISSTableScanner;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.util.File;
+import org.apache.cassandra.journal.Journal;
 import org.apache.cassandra.journal.SegmentCompactor;
 import org.apache.cassandra.journal.StaticSegment;
 import org.apache.cassandra.journal.TestParams;
@@ -75,6 +84,7 @@ import org.apache.cassandra.service.accord.serializers.ResultSerializers;
 import org.apache.cassandra.service.accord.serializers.TopologySerializers;
 import org.apache.cassandra.service.accord.serializers.Version;
 import org.apache.cassandra.tools.FieldUtil;
+import org.apache.cassandra.utils.CloseableIterator;
 
 import static accord.impl.PrefixedIntHashKey.ranges;
 import static org.apache.cassandra.utils.TimeUUID.Generator.nextTimeUUID;
@@ -112,6 +122,11 @@ public class AccordJournalBurnTest extends BurnTestBase
         FieldUtil.setInstanceUnsafe(TopologySerializers.class,
                                     new TopologySerializers.ShardSerializer(BurnTestKeySerializers.range),
                                     "shard");
+        // compact topology inlines all serialziation and uses TokenRange directly, so it has to be fully stubbed out
+        // for this class.
+        FieldUtil.setInstanceUnsafe(TopologySerializers.class,
+                                    TopologySerializers.topology,
+                                    "compactTopology");
     }
 
     private static final AtomicInteger counter = new AtomicInteger();
@@ -165,7 +180,7 @@ public class AccordJournalBurnTest extends BurnTestBase
                  5 + random.nextInt(15),
                  operations,
                  10 + random.nextInt(30),
-                 new RandomDelayQueue.Factory(random).get(),
+                 RandomDelayQueue::new,
                  (nodeId, randomSource) -> {
                      try
                      {
@@ -240,9 +255,11 @@ public class AccordJournalBurnTest extends BurnTestBase
                                  return new DefaultCompactionWriter(cfs, directories, transaction, nonExpiredSSTables, false, 0);
                              }
 
+                             int counter;
                              @Override
                              public void purge(CommandStores commandStores, EpochSupplier minEpoch)
                              {
+                                 ++counter;
                                  this.journal.closeCurrentSegmentForTestingIfNonEmpty();
                                  this.journal.runCompactorForTesting();
 
@@ -269,8 +286,8 @@ public class AccordJournalBurnTest extends BurnTestBase
                                      return;
                                  List<ISSTableScanner> scanners = selected.stream().map(SSTableReader::getScanner).collect(Collectors.toList());
 
+                                 TreeMap<JournalKey, Command> before = read(commandStores);
                                  Collection<SSTableReader> newSStables;
-
                                  try (LifecycleTransaction txn = cfs.getTracker().tryModify(selected, OperationType.COMPACTION);
                                       CompactionController controller = new CompactionController(cfs, selected, 0);
                                       CompactionIterator ci = new CompactionIterator(OperationType.COMPACTION,
@@ -296,17 +313,59 @@ public class AccordJournalBurnTest extends BurnTestBase
                                          throw new RuntimeException(e);
                                      }
                                  }
-
+                                 TreeMap<JournalKey, Command> after = read(commandStores);
+                                 for (Map.Entry<JournalKey, Command> e : before.entrySet())
+                                 {
+                                     Command b = e.getValue();
+                                     Command a = after.get(e.getKey());
+                                     Invariants.require(Objects.equals(a, b));
+                                 }
+                                 if (before.size() != after.size())
+                                 {
+                                     for (Map.Entry<JournalKey, Command> e : after.entrySet())
+                                         Invariants.require(null != before.get(e.getKey()));
+                                     Invariants.require(false);
+                                 }
                                  Invariants.require(!orig.equals(cfs.getLiveSSTables()));
                              }
 
+                             private TreeMap<JournalKey, Command> read(CommandStores commandStores)
+                             {
+                                 TreeMap<JournalKey, Command> result = new TreeMap<>(JournalKey.SUPPORT::compare);
+                                 try (CloseableIterator<Journal.KeyRefs<JournalKey>> iter = journalTable.keyIterator(null, null, false))
+                                 {
+                                     JournalKey prev = null;
+                                     while (iter.hasNext())
+                                     {
+                                         Journal.KeyRefs<JournalKey> ref = iter.next();
+                                         if (ref.key().type != JournalKey.Type.COMMAND_DIFF)
+                                             continue;
+
+                                         JournalKey key = ref.key();
+                                         if (key.equals(prev)) continue;
+                                         CommandStore commandStore = commandStores.forId(ref.key().commandStoreId);
+                                         Command command = loadCommand(key.commandStoreId, key.id, commandStore.unsafeGetRedundantBefore(), commandStore.durableBefore());
+                                         if (command != null)
+                                            result.put(key, command);
+                                         prev = key;
+                                     }
+                                 }
+                                 return result;
+                             }
 
                              @Override
-                             public void replay(CommandStores commandStores)
+                             public boolean replay(CommandStores commandStores)
                              {
                                  // Make sure to replay _only_ static segments
                                  this.closeCurrentSegmentForTestingIfNonEmpty();
-                                 super.replay(commandStores);
+                                 return super.replay(commandStores);
+                             }
+
+                             @Override
+                             public PersistentField.Persister<DurableBefore, DurableBefore> durableBeforePersister()
+                             {
+                                 // TODO (required): we should be persisting in the journal, but this currently causes the burn test to take far too long
+                                 return DurableBefore.NOOP_PERSISTER;
                              }
                          };
 
@@ -329,10 +388,16 @@ public class AccordJournalBurnTest extends BurnTestBase
     public static IAccordService.AccordCompactionInfos getCompactionInfo(Node node, TableId tableId)
     {
         IAccordService.AccordCompactionInfos compactionInfos = new IAccordService.AccordCompactionInfos(node.durableBefore(), node.topology().minEpoch());
-        node.commandStores().forEachCommandStore(commandStore -> {
+        node.commandStores().forAllUnsafe(commandStore -> {
+            RedundantBefore redundantBefore = commandStore.unsafeGetRedundantBefore();
+            if (redundantBefore == null)
+                redundantBefore = RedundantBefore.EMPTY;
+            CommandStores.RangesForEpoch rangesForEpoch = commandStore.unsafeGetRangesForEpoch();
+            if (rangesForEpoch == null)
+                rangesForEpoch = CommandStores.RangesForEpoch.EMPTY;
             compactionInfos.put(commandStore.id(), new IAccordService.AccordCompactionInfo(commandStore.id(),
-                                                                                           commandStore.unsafeGetRedundantBefore(),
-                                                                                           commandStore.unsafeGetRangesForEpoch(),
+                                                                                           redundantBefore,
+                                                                                           rangesForEpoch,
                                                                                            tableId));
         });
         return compactionInfos;

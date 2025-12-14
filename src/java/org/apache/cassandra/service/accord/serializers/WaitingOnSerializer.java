@@ -20,7 +20,7 @@ package org.apache.cassandra.service.accord.serializers;
 
 import java.io.IOException;
 
-import accord.impl.CommandChange.WaitingOnProvider;
+import accord.impl.CommandChange.WaitingOnBitSets;
 import accord.local.Command;
 import accord.local.Command.WaitingOn;
 import accord.primitives.PartialDeps;
@@ -30,7 +30,7 @@ import accord.primitives.Timestamp;
 import accord.primitives.TxnId;
 import accord.utils.ImmutableBitSet;
 import accord.utils.Invariants;
-import accord.utils.SimpleBitSet;
+import accord.utils.LargeBitSet;
 import org.apache.cassandra.db.TypeSizes;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
@@ -57,21 +57,18 @@ public class WaitingOnSerializer
         }
     }
 
-    public static final class Provider implements WaitingOnProvider
+    public static final class WaitingOnBitSetsAndLength extends WaitingOnBitSets
     {
-        final ImmutableBitSet waitingOn, appliedOrInvalidated;
         final int waitingOnLength, appliedOrInvalidatedLength;
 
-        public Provider(ImmutableBitSet waitingOn, ImmutableBitSet appliedOrInvalidated, int waitingOnLength, int appliedOrInvalidatedLength)
+        public WaitingOnBitSetsAndLength(ImmutableBitSet waitingOn, ImmutableBitSet appliedOrInvalidated, int waitingOnLength, int appliedOrInvalidatedLength)
         {
-            this.waitingOn = waitingOn;
-            this.appliedOrInvalidated = appliedOrInvalidated;
+            super(waitingOn, appliedOrInvalidated);
             this.waitingOnLength = waitingOnLength;
             this.appliedOrInvalidatedLength = appliedOrInvalidatedLength;
         }
 
-        @Override
-        public WaitingOn provide(TxnId txnId, PartialDeps deps, Timestamp executeAtLeast, long uniqueHlc)
+        public WaitingOn construct(PartialDeps deps, Timestamp executeAtLeast, long uniqueHlc)
         {
             Invariants.nonNull(deps);
             RoutingKeys keys = deps.keyDeps.keys();
@@ -98,7 +95,7 @@ public class WaitingOnSerializer
         }
     }
 
-    public static WaitingOnProvider deserializeProvider(TxnId txnId, DataInputPlus in) throws IOException
+    public static WaitingOnBitSets deserializeBitSets(TxnId txnId, DataInputPlus in) throws IOException
     {
         ImmutableBitSet waitingOn, appliedOrInvalidated = null;
         int waitingOnLength, appliedOrInvalidatedLength = 0;
@@ -110,7 +107,7 @@ public class WaitingOnSerializer
             appliedOrInvalidated = deserialize(appliedOrInvalidatedLength, in);
         }
 
-        return new Provider(waitingOn, appliedOrInvalidated, waitingOnLength, appliedOrInvalidatedLength);
+        return new WaitingOnBitSetsAndLength(waitingOn, appliedOrInvalidated, waitingOnLength, appliedOrInvalidatedLength);
     }
 
     public static void skip(TxnId txnId, DataInputPlus in) throws IOException
@@ -124,9 +121,9 @@ public class WaitingOnSerializer
         }
     }
 
-    private static void serialize(int length, SimpleBitSet write, DataOutputPlus out) throws IOException
+    private static void serialize(int length, LargeBitSet write, DataOutputPlus out) throws IOException
     {
-        long[] bits = SimpleBitSet.SerializationSupport.getArray(write);
+        long[] bits = LargeBitSet.SerializationSupport.getArray(write);
         Invariants.require(length == bits.length);
         for (int i = 0; i < length; i++)
             out.writeLong(bits[i]);
@@ -140,9 +137,9 @@ public class WaitingOnSerializer
         return ImmutableBitSet.SerializationSupport.construct(bits);
     }
 
-    public static long serializedSize(int length, SimpleBitSet write)
+    public static long serializedSize(int length, LargeBitSet write)
     {
-        long[] bits = SimpleBitSet.SerializationSupport.getArray(write);
+        long[] bits = LargeBitSet.SerializationSupport.getArray(write);
         Invariants.require(length == bits.length, "Expected length %d != %d", length, bits.length);
         return (long) TypeSizes.LONG_SIZE * length;
     }

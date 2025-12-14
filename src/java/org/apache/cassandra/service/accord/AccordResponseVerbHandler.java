@@ -22,7 +22,6 @@ import java.util.concurrent.TimeUnit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import accord.coordinate.Timeout;
 import accord.impl.RequestCallbacks;
 import accord.local.Node;
 import accord.messages.Reply;
@@ -55,13 +54,13 @@ class AccordResponseVerbHandler<T extends Reply> implements IVerbHandler<T>
     @Override
     public void doVerb(Message message)
     {
-        if (!AccordService.instance().shouldAcceptMessages())
+        Node.Id from = endpointMapper.mappedIdOrNull(message.from(), message);
+        if (from == null)
         {
             dropping.debug(message.verb(), message.from());
             return;
         }
 
-        Node.Id from = endpointMapper.mappedId(message.from());
         logger.trace("Receiving {} from {}", message.payload, message.from());
         if (message.isFailureResponse())
         {
@@ -84,7 +83,7 @@ class AccordResponseVerbHandler<T extends Reply> implements IVerbHandler<T>
     private static Throwable convertFailureMessage(RequestFailure failure)
     {
         return failure.reason == RequestFailureReason.TIMEOUT ?
-               new Timeout(null, null) :
+               null :
                new RuntimeException(failure.failure);
     }
 

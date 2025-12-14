@@ -20,19 +20,22 @@ package org.apache.cassandra.service.accord;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 import java.util.function.BiConsumer;
-import java.util.function.BiFunction;
-import java.util.function.Function;
+
+import javax.annotation.Nullable;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.primitives.Ints;
 
 import accord.utils.ArrayBuffers.BufferList;
+import accord.utils.IntrusiveLinkedList;
 import accord.utils.IntrusiveLinkedListNode;
 import accord.utils.Invariants;
 import accord.utils.async.Cancellable;
 import org.apache.cassandra.service.accord.AccordCache.Adapter;
+import org.apache.cassandra.service.accord.AccordCache.Adapter.Shrink;
 import org.apache.cassandra.utils.ObjectSizes;
 
 import static org.apache.cassandra.service.accord.AccordCacheEntry.Status.EVICTED;
@@ -43,6 +46,7 @@ import static org.apache.cassandra.service.accord.AccordCacheEntry.Status.LOADIN
 import static org.apache.cassandra.service.accord.AccordCacheEntry.Status.MODIFIED;
 import static org.apache.cassandra.service.accord.AccordCacheEntry.Status.SAVING;
 import static org.apache.cassandra.service.accord.AccordCacheEntry.Status.WAITING_TO_LOAD;
+import static org.apache.cassandra.service.accord.AccordCacheEntry.Status.WAITING_TO_SAVE;
 
 /**
  * Global (per CommandStore) state of a cached entity (Command or CommandsForKey).
@@ -52,16 +56,29 @@ public class AccordCacheEntry<K, V> extends IntrusiveLinkedListNode
     public enum Status
     {
         UNINITIALIZED,
+
+        UNUSED1, // spacing to permit easier bit masks
+
         WAITING_TO_LOAD(UNINITIALIZED),
         LOADING(WAITING_TO_LOAD),
+
         /**
          * Consumers should never see this state
          */
         FAILED_TO_LOAD(LOADING),
 
+        UNUSED2, // spacing to permit easier bit masks
+        UNUSED3, // spacing to permit easier bit masks
+        UNUSED4, // spacing to permit easier bit masks
+
         LOADED(true, false, UNINITIALIZED, LOADING),
         MODIFIED(true, false, LOADED),
-        SAVING(true, true, MODIFIED),
+
+        UNUSED5, // spacing to permit easier bit masks
+        UNUSED6, // spacing to permit easier bit masks
+
+        WAITING_TO_SAVE(true, true, MODIFIED),
+        SAVING(true, true, MODIFIED, WAITING_TO_SAVE),
 
         /**
          * Attempted to save but failed. Shouldn't normally happen unless we have a bug in serialization,
@@ -69,7 +86,7 @@ public class AccordCacheEntry<K, V> extends IntrusiveLinkedListNode
          */
         FAILED_TO_SAVE(true, true, SAVING),
 
-        UNUSED, // spacing to permit easier bit masks
+        UNUSED7, // spacing to permit easier bit masks
 
         EVICTED(WAITING_TO_LOAD, LOADING, LOADED, FAILED_TO_LOAD),
         ;
@@ -84,8 +101,11 @@ public class AccordCacheEntry<K, V> extends IntrusiveLinkedListNode
             LOADED.permittedFrom |= 1 << MODIFIED.ordinal();
             for (Status status : VALUES)
             {
+                if (status.name().startsWith("UNUSED")) continue;
                 Invariants.require((status.ordinal() & IS_LOADED) != 0 == status.loaded);
                 Invariants.require(((status.ordinal() & IS_LOADED) != 0 && (status.ordinal() & IS_NESTED) != 0) == status.nested);
+                Invariants.require(((status.ordinal() & IS_LOADING_OR_WAITING_MASK) == IS_LOADING_OR_WAITING) == (status == LOADING || status == WAITING_TO_LOAD));
+                Invariants.require(((status.ordinal() & IS_SAVING_OR_WAITING_MASK) == IS_SAVING_OR_WAITING) == (status == SAVING || status == WAITING_TO_SAVE));
             }
         }
 
@@ -110,10 +130,13 @@ public class AccordCacheEntry<K, V> extends IntrusiveLinkedListNode
     static final int STATUS_MASK = 0x0000001F;
     static final int SHRUNK = 0x00000040;
     static final int NO_EVICT = 0x00000020;
-    static final int IS_LOADED = 0x4;
-    static final int IS_NESTED = 0x2; // only valid to test if already tested NORMAL
-    static final int IS_LOADING_OR_WAITING_MASK = 0x6; // only valid to test if already tested NORMAL
-    static final int IS_LOADING_OR_WAITING = 0x2; // only valid to test if already tested NORMAL
+    static final int IS_NOT_EVICTED = 0xF;
+    static final int IS_LOADED = 0x8;
+    static final int IS_NESTED = 0x4;
+    static final int IS_LOADING_OR_WAITING_MASK = 0x6;
+    static final int IS_LOADING_OR_WAITING = 0x2;
+    static final int IS_SAVING_OR_WAITING_MASK = 0xE;
+    static final int IS_SAVING_OR_WAITING = 0xC;
     static final long EMPTY_SIZE = ObjectSizes.measure(new AccordCacheEntry<>(null, null));
 
     private final K key;
@@ -166,6 +189,11 @@ public class AccordCacheEntry<K, V> extends IntrusiveLinkedListNode
         return (status & IS_LOADED) != 0;
     }
 
+    boolean isModified()
+    {
+        return (status & IS_NOT_EVICTED) >= MODIFIED.ordinal();
+    }
+
     boolean isNested()
     {
         Invariants.require(isLoaded());
@@ -185,6 +213,11 @@ public class AccordCacheEntry<K, V> extends IntrusiveLinkedListNode
     boolean isLoadingOrWaiting()
     {
         return (status & IS_LOADING_OR_WAITING_MASK) == IS_LOADING_OR_WAITING;
+    }
+
+    boolean isSavingOrWaiting()
+    {
+        return (status & IS_SAVING_OR_WAITING_MASK) == IS_SAVING_OR_WAITING;
     }
 
     public boolean isComplete()
@@ -227,6 +260,7 @@ public class AccordCacheEntry<K, V> extends IntrusiveLinkedListNode
         // TODO (expected): we aren't weighing the keys
         sizeOnHeap = Ints.saturatedCast(EMPTY_SIZE);
         parent.updateSize(sizeOnHeap, sizeOnHeap, false, false);
+        parent.objectSize.increment(EMPTY_SIZE);
     }
 
     @Override
@@ -288,57 +322,49 @@ public class AccordCacheEntry<K, V> extends IntrusiveLinkedListNode
         owner.notifyListeners(notify, this);
     }
 
-    public interface OnLoaded
+    public interface LoadExecutor<P1, P2>
     {
-        <K, V> void onLoaded(AccordCacheEntry<K, V> state, V value, Throwable fail);
+        <K, V> Cancellable load(P1 p1, P2 p2, AccordCacheEntry<K, V> entry);
+    }
 
-        static OnLoaded immediate()
+    // functions as both an identity object, and a register of listeners
+    public static class UniqueSave
+    {
+        @Nullable List<Runnable> onSuccess;
+        void onSuccess(Runnable onSuccess)
         {
-            return new OnLoaded()
+            if (this.onSuccess == null)
+                this.onSuccess = new ArrayList<>();
+            this.onSuccess.add(onSuccess);
+        }
+
+        static void notify(List<Runnable> onSuccess)
+        {
+            if (onSuccess != null)
             {
-                @Override
-                public <K, V> void onLoaded(AccordCacheEntry<K, V> state, V value, Throwable fail)
-                {
-                    if (fail == null) state.loaded(value);
-                    else state.failedToLoad();
-                }
-            };
+                onSuccess.forEach(run -> {
+                    try { run.run(); }
+                    catch (Throwable t)
+                    {
+                        Thread thread = Thread.currentThread();
+                        thread.getUncaughtExceptionHandler().uncaughtException(thread, t);
+                    }
+                });
+            }
         }
     }
 
-    public interface OnSaved
+    public interface SaveExecutor
     {
-        <K, V> void onSaved(AccordCacheEntry<K, V> state, Object identity, Throwable fail);
-
-        static OnSaved immediate()
-        {
-            return new OnSaved()
-            {
-                @Override
-                public <K, V> void onSaved(AccordCacheEntry<K, V> state, Object identity, Throwable fail)
-                {
-                    state.saved(identity, fail);
-                }
-            };
-        }
+        Cancellable save(AccordCacheEntry<?, ?> saving, UniqueSave identity, Runnable save);
     }
 
-    public <P> Loading load(BiFunction<P, Runnable, Cancellable> loadExecutor, P param, Adapter<K, V, ?> adapter, OnLoaded onLoaded)
+    public <P1, P2> Loading load(LoadExecutor<P1, P2> loadExecutor, P1 p1, P2 p2)
     {
         Invariants.require(is(WAITING_TO_LOAD), "%s", this);
-        Loading loading = ((WaitingToLoad)state).load(loadExecutor.apply(param, () -> {
-            V result;
-            try
-            {
-                result = adapter.load(owner.commandStore, key);
-            }
-            catch (Throwable t)
-            {
-                onLoaded.onLoaded(this, null, t);
-                throw t;
-            }
-            onLoaded.onLoaded(this, result, null);
-        }));
+
+        WaitingToLoad cur = (WaitingToLoad)state;
+        Loading loading = cur.load(loadExecutor.load(p1, p2, this));
         setStatus(LOADING);
         state = loading;
         return loading;
@@ -375,6 +401,21 @@ public class AccordCacheEntry<K, V> extends IntrusiveLinkedListNode
         return (V)unwrap();
     }
 
+    public Object getOrShrunkExclusive()
+    {
+        Invariants.require(owner == null || owner.commandStore == null || owner.commandStore.executor().isOwningThread());
+        Invariants.require(isLoaded(), "%s", this);
+        return unwrap();
+    }
+
+    public V tryGetExclusive()
+    {
+        Invariants.require(owner == null || owner.commandStore == null || owner.commandStore.executor().isOwningThread());
+        if (!isLoaded() || isShrunk())
+            return null;
+        return (V)unwrap();
+    }
+
     private Object unwrap()
     {
         return isNested() ? ((Nested)state).state : state;
@@ -387,11 +428,20 @@ public class AccordCacheEntry<K, V> extends IntrusiveLinkedListNode
             return;
 
         Saving cancel = is(SAVING) ? ((Saving)state) : null;
-        setStatus(MODIFIED);
-        state = value;
+        if (is(WAITING_TO_SAVE))
+        {
+            ((WaitingToSave<K, V>) state).state = value;
+            if (owner.parent().adapter().canSave(value, null))
+                save();
+        }
+        else
+        {
+            setStatus(MODIFIED);
+            state = value;
+        }
         updateSize(owner.parent());
-        // TODO (expected): do we want to always cancel in-progress saving?
-        if (cancel != null)
+        // TODO (expected): do we want to cancel in-progress saving?
+        if (cancel != null && cancel.identity.onSuccess == null)
             cancel.saving.cancel();
     }
 
@@ -414,16 +464,26 @@ public class AccordCacheEntry<K, V> extends IntrusiveLinkedListNode
         state = null;
     }
 
-    boolean tryShrink()
+    Shrink tryShrink()
     {
         if (!isLoaded())
-            return false;
+            return Shrink.EVICT;
 
         AccordCache.Type<K, V, ?> parent = owner.parent();
-        if (!tryShrink(key, parent.adapter()))
-            return false;
-        updateSize(parent);
-        return true;
+        Adapter<K, V, ?> adapter = parent.adapter();
+        if (isShrunk() || state == null)
+            return Shrink.EVICT;
+
+        V cur = (V)unwrap();
+        Shrink shrink = adapter.decideFullShrink(key, cur);
+        if (shrink == Shrink.PERFORM_WITHOUT_LOCK)
+            return Shrink.PERFORM_WITHOUT_LOCK;
+
+        Object upd = adapter.fullShrink(key, cur);
+        if (upd == null || upd == cur)
+            return Shrink.EVICT;
+        applyShrink(parent, cur, upd);
+        return Shrink.DONE;
     }
 
     V tryGetFull()
@@ -441,42 +501,55 @@ public class AccordCacheEntry<K, V> extends IntrusiveLinkedListNode
         return state == null;
     }
 
+    boolean saveWhenReady()
+    {
+        V full = isShrunk() ? null : (V)state;
+        Object shrunk = isShrunk() ? state : null;
+        if (owner.parent().adapter().canSave(full, shrunk))
+            return save();
+
+        setStatus(WAITING_TO_SAVE);
+        UniqueSave identity = new UniqueSave();
+        state = new WaitingToSave<>(identity, state);
+        return true;
+    }
+
     /**
      * Submits a save runnable to the specified executor. When the runnable
      * has completed, the state save will have either completed or failed.
      */
     @VisibleForTesting
-    void save(Function<Runnable, Cancellable> saveExecutor, Adapter<K, V, ?> adapter, OnSaved onSaved)
+    boolean save()
     {
+        WaitingToSave<K, V> waitingToSave = is(WAITING_TO_SAVE) ? (WaitingToSave<K, V>)state : null;
+        Object state = waitingToSave == null ? this.state : waitingToSave.state;
         V full = isShrunk() ? null : (V)state;
         Object shrunk = isShrunk() ? state : null;
-        Runnable save = adapter.save(owner.commandStore, key, full, shrunk);
+        Runnable save = owner.parent().adapter().save(owner.commandStore, key, full, shrunk);
+
+        UniqueSave identity = waitingToSave == null ? new UniqueSave() : waitingToSave.identity;
         if (null == save) // null mutation -> null Runnable -> no change on disk
         {
             setStatus(LOADED);
+            if (waitingToSave != null)
+                this.state = state;
+            UniqueSave.notify(identity.onSuccess);
+            return false;
         }
         else
         {
             setStatus(SAVING);
-            Object identity = new Object();
-            Cancellable saving = saveExecutor.apply(() -> {
-                try
-                {
-                    save.run();
-                }
-                catch (Throwable t)
-                {
-                    onSaved.onSaved(this, identity, t);
-                    throw t;
-                }
-                onSaved.onSaved(this, identity, null);
-            });
-            state = new Saving(saving, identity, state);
+            Cancellable saving = owner.parent().parent().saveExecutor.save(this, identity, save);
+            this.state = new Saving(saving, identity, state);
+            return true;
         }
     }
 
     boolean saved(Object identity, Throwable fail)
     {
+        if (identity instanceof UniqueSave)
+            UniqueSave.notify(((UniqueSave) identity).onSuccess);
+
         if (!is(SAVING))
             return false;
 
@@ -504,9 +577,9 @@ public class AccordCacheEntry<K, V> extends IntrusiveLinkedListNode
         setStatus(LOADED);
     }
 
-    public Cancellable saving()
+    public SavingOrWaitingToSave savingOrWaitingToSave()
     {
-        return ((Saving)state).saving;
+        return (SavingOrWaitingToSave) state;
     }
 
     public AccordCacheEntry<K, V> evicted()
@@ -523,19 +596,22 @@ public class AccordCacheEntry<K, V> extends IntrusiveLinkedListNode
         return ((FailedToSave)state).cause;
     }
 
-    private boolean tryShrink(K key, Adapter<K, V, ?> adapter)
+    void tryApplyShrink(Object cur, Object upd, IntrusiveLinkedList<AccordCacheEntry<?,?>> queue)
     {
-        Invariants.require(!isNested());
-        if (isShrunk() || state == null)
-            return false;
+        if (references() > 0 || !isUnqueued())
+            return;
 
-        Object update = adapter.fullShrink(key, (V)state);
-        if (update == null || update == state)
-            return false;
+        if (isLoaded() && unwrap() == cur && upd != cur && upd != null)
+            applyShrink(owner.parent(), cur, upd);
+        queue.addLast(this);
+    }
 
-        state = update;
+    private void applyShrink(AccordCache.Type<K, V, ?> parent, Object cur, Object upd)
+    {
+        if (isNested()) ((Nested)this.state).state = upd;
+        else this.state = upd;
         status |= SHRUNK;
-        return true;
+        updateSize(parent);
     }
 
     private void inflate(AccordCommandStore commandStore, K key, Adapter<K, V, ?> adapter)
@@ -632,16 +708,33 @@ public class AccordCacheEntry<K, V> extends IntrusiveLinkedListNode
         Object state;
     }
 
-    static class Saving extends Nested
+    static class SavingOrWaitingToSave extends Nested
     {
-        final Cancellable saving;
-        final Object identity;
+        final UniqueSave identity;
 
-        Saving(Cancellable saving, Object identity, Object state)
+        SavingOrWaitingToSave(UniqueSave identity, Object state)
         {
-            this.saving = saving;
             this.identity = identity;
             this.state = state;
+        }
+    }
+
+    static class Saving extends SavingOrWaitingToSave
+    {
+        final Cancellable saving;
+
+        Saving(Cancellable saving, UniqueSave identity, Object state)
+        {
+            super(identity, state);
+            this.saving = saving;
+        }
+    }
+
+    static class WaitingToSave<K, V> extends SavingOrWaitingToSave
+    {
+        WaitingToSave(UniqueSave identity, Object state)
+        {
+            super(identity, state);
         }
     }
 

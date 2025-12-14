@@ -29,7 +29,7 @@ import accord.api.RoutingKey;
 import accord.local.StoreParticipants;
 import accord.local.cfk.CommandsForKey;
 import accord.local.Command;
-import accord.local.KeyHistory;
+import accord.local.LoadKeys;
 import accord.local.Node;
 import accord.local.PreLoadContext;
 import accord.local.SafeCommand;
@@ -57,9 +57,10 @@ import org.apache.cassandra.service.accord.api.PartitionKey;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
 import static accord.api.ProtocolModifiers.Toggles.filterDuplicateDependenciesFromAcceptReply;
+import static accord.local.LoadKeysFor.READ_WRITE;
 import static accord.messages.Accept.Kind.SLOW;
-import static accord.utils.async.AsyncChains.getUninterruptibly;
 import static org.apache.cassandra.cql3.statements.schema.CreateTableStatement.parse;
+import static org.apache.cassandra.service.accord.AccordService.getBlocking;
 import static org.apache.cassandra.service.accord.AccordTestUtils.createAccordCommandStore;
 import static org.apache.cassandra.service.accord.AccordTestUtils.createWriteTxn;
 import static org.apache.cassandra.service.accord.AccordTestUtils.fullRange;
@@ -68,7 +69,6 @@ import static org.apache.cassandra.service.accord.AccordTestUtils.txnId;
 
 public class AccordCommandTest
 {
-
     static final AtomicLong clock = new AtomicLong(0);
     private static final Node.Id ID1 = new Node.Id(1);
     private static final Node.Id ID2 = new Node.Id(2);
@@ -96,19 +96,19 @@ public class AccordCommandTest
     public void basicCycleTest() throws Throwable
     {
         AccordCommandStore commandStore = createAccordCommandStore(clock::incrementAndGet, "ks", "tbl");
-        getUninterruptibly(commandStore.execute(PreLoadContext.empty(), unused -> commandStore.executor().cacheUnsafe().setCapacity(0)));
+        getBlocking(commandStore.execute((PreLoadContext.Empty)() -> "Test", unused -> commandStore.executor().cacheUnsafe().setCapacity(0)));
 
         TxnId txnId = txnId(1, clock.incrementAndGet(), 1);
         Txn txn = createWriteTxn(1);
         Key key = (Key)txn.keys().get(0);
         RoutingKey homeKey = key.toUnseekable();
         FullRoute<?> fullRoute = txn.keys().toRoute(homeKey);
-        Route<?> route = fullRoute.slice(fullRange(txn));
+        Route<?> route = fullRoute.overlapping(fullRange(txn));
         PartialTxn partialTxn = txn.intersecting(route, true);
         PreAccept preAccept = PreAccept.SerializerSupport.create(txnId, route, 1, 1, 1, partialTxn, null, false, fullRoute);
 
         // Check preaccept
-        getUninterruptibly(commandStore.execute(preAccept, safeStore -> {
+        getBlocking(commandStore.execute(preAccept, safeStore -> {
             SafeCommand safeCommand = safeStore.get(txnId, StoreParticipants.all(route));
             Command before = safeCommand.current();
             PreAccept.PreAcceptReply reply = preAccept.apply(safeStore);
@@ -122,7 +122,7 @@ public class AccordCommandTest
             AccordTestUtils.appendCommandsBlocking(commandStore, before, after);
         }));
 
-        getUninterruptibly(commandStore.execute(preAccept, safeStore -> {
+        getBlocking(commandStore.execute(preAccept, safeStore -> {
             Command before = safeStore.ifInitialised(txnId).current();
             SafeCommand safeCommand = safeStore.get(txnId, StoreParticipants.all(route));
             Assert.assertEquals(txnId, before.executeAt());
@@ -146,7 +146,7 @@ public class AccordCommandTest
         }
         Accept accept = Accept.SerializerSupport.create(txnId, route, 1, 1, SLOW, Ballot.ZERO, executeAt, deps, false);
 
-        getUninterruptibly(commandStore.execute(accept, safeStore -> {
+        getBlocking(commandStore.execute(accept, safeStore -> {
             Command before = safeStore.ifInitialised(txnId).current();
             Accept.AcceptReply reply = accept.apply(safeStore);
             Assert.assertTrue(reply.isOk());
@@ -155,7 +155,7 @@ public class AccordCommandTest
             AccordTestUtils.appendCommandsBlocking(commandStore, before, after);
         }));
 
-        getUninterruptibly(commandStore.execute(accept, safeStore -> {
+        getBlocking(commandStore.execute(accept, safeStore -> {
             Command before = safeStore.ifInitialised(txnId).current();
             Assert.assertEquals(executeAt, before.executeAt());
             Assert.assertEquals(Status.AcceptedSlow, before.status());
@@ -169,13 +169,13 @@ public class AccordCommandTest
 
         // check commit
         Commit commit = Commit.SerializerSupport.create(txnId, route, 1, 1, Commit.Kind.StableWithTxnAndDeps, Ballot.ZERO, executeAt, partialTxn, deps, fullRoute);
-        getUninterruptibly(commandStore.execute(commit, commit::apply));
+        getBlocking(commandStore.execute(commit, commit::apply));
 
-        getUninterruptibly(commandStore.execute(PreLoadContext.contextFor(txnId, Keys.of(key).toParticipants(), KeyHistory.SYNC), safeStore -> {
+        getBlocking(commandStore.execute(PreLoadContext.contextFor(txnId, Keys.of(key).toParticipants(), LoadKeys.SYNC, READ_WRITE, "Test"), safeStore -> {
             Command before = safeStore.ifInitialised(txnId).current();
             Assert.assertEquals(commit.executeAt, before.executeAt());
             Assert.assertTrue(before.hasBeen(Status.Committed));
-            Assert.assertEquals(commit.partialDeps, before.partialDeps());
+            Assert.assertEquals(commit.partialDeps(), before.partialDeps());
 
             CommandsForKey cfk = safeStore.get(key(1).toUnseekable()).current();
             Assert.assertTrue(cfk.indexOf(txnId) >= 0);
@@ -188,18 +188,18 @@ public class AccordCommandTest
     public void computeDeps() throws Throwable
     {
         AccordCommandStore commandStore = createAccordCommandStore(clock::incrementAndGet, "ks", "tbl");
-        getUninterruptibly(commandStore.execute(PreLoadContext.empty(), unused -> commandStore.executor().cacheUnsafe().setCapacity(0)));
+        getBlocking(commandStore.execute((PreLoadContext.Empty)()->"Test", unused -> commandStore.executor().cacheUnsafe().setCapacity(0)));
 
         TxnId txnId1 = txnId(1, clock.incrementAndGet(), 1);
         Txn txn = createWriteTxn(2);
         Key key = (Key)txn.keys().get(0);
         RoutingKey homeKey = key.toUnseekable();
         FullRoute<?> fullRoute = txn.keys().toRoute(homeKey);
-        Route<?> route = fullRoute.slice(fullRange(txn));
+        Route<?> route = fullRoute.overlapping(fullRange(txn));
         PartialTxn partialTxn = txn.intersecting(route, true);
         PreAccept preAccept1 = PreAccept.SerializerSupport.create(txnId1, route, 1, 1, 1, partialTxn, null, false, fullRoute);
 
-        getUninterruptibly(commandStore.execute(preAccept1, safeStore -> {
+        getBlocking(commandStore.execute(preAccept1, safeStore -> {
             persistDiff(commandStore, safeStore, txnId1, route, () -> {
                 preAccept1.apply(safeStore);
             });
@@ -208,7 +208,7 @@ public class AccordCommandTest
         // second preaccept should identify txnId1 as a dependency
         TxnId txnId2 = txnId(1, clock.incrementAndGet(), 1);
         PreAccept preAccept2 = PreAccept.SerializerSupport.create(txnId2, route, 1, 1, 1, partialTxn, null, false, fullRoute);
-        getUninterruptibly(commandStore.execute(preAccept2, safeStore -> {
+        getBlocking(commandStore.execute(preAccept2, safeStore -> {
             persistDiff(commandStore, safeStore, txnId2, route, () -> {
                 PreAccept.PreAcceptReply reply = preAccept2.apply(safeStore);
                 Assert.assertTrue(reply.isOk());

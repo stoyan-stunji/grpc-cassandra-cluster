@@ -69,7 +69,7 @@ import org.apache.cassandra.db.ReadCommand;
 import org.apache.cassandra.db.SerializationHeader;
 import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.db.compaction.OperationType;
-import org.apache.cassandra.db.lifecycle.LifecycleNewTracker;
+import org.apache.cassandra.db.lifecycle.ILifecycleTransaction;
 import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
 import org.apache.cassandra.db.marshal.Int32Type;
 import org.apache.cassandra.db.marshal.UUIDType;
@@ -559,7 +559,7 @@ public class ScrubTest
 
         if (compression)
         { // overwrite with garbage the compression chunks from key1 to key2
-            CompressionMetadata compData = CompressionInfoComponent.load(sstable.descriptor);
+            CompressionMetadata compData = CompressionInfoComponent.load(sstable.descriptor, null);
 
             CompressionMetadata.Chunk chunk1 = compData.chunkFor(
             sstable.getPosition(PartitionPosition.ForKey.get(key1, sstable.getPartitioner()), SSTableReader.Operator.EQ));
@@ -847,9 +847,9 @@ public class ScrubTest
 
     private static class TestMultiWriter extends SimpleSSTableMultiWriter
     {
-        TestMultiWriter(SSTableWriter writer, LifecycleNewTracker lifecycleNewTracker)
+        TestMultiWriter(SSTableWriter writer, ILifecycleTransaction txn)
         {
-            super(writer, lifecycleNewTracker);
+            super(writer, txn);
         }
     }
 

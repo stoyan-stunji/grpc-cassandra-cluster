@@ -43,6 +43,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import javax.annotation.Nullable;
+import javax.management.InstanceNotFoundException;
 import javax.management.JMX;
 import javax.management.MBeanServerConnection;
 import javax.management.MalformedObjectNameException;
@@ -88,6 +89,11 @@ import org.apache.cassandra.batchlog.BatchlogManagerMBean;
 import org.apache.cassandra.db.ColumnFamilyStoreMBean;
 import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.db.compaction.CompactionManagerMBean;
+import org.apache.cassandra.db.compression.CompressionDictionaryDetailsTabularData;
+import org.apache.cassandra.db.compression.CompressionDictionaryManagerMBean;
+import org.apache.cassandra.db.compression.TrainingState;
+import org.apache.cassandra.db.guardrails.Guardrails;
+import org.apache.cassandra.db.guardrails.GuardrailsMBean;
 import org.apache.cassandra.db.virtual.CIDRFilteringMetricsTable;
 import org.apache.cassandra.db.virtual.CIDRFilteringMetricsTableMBean;
 import org.apache.cassandra.fql.FullQueryLoggerOptions;
@@ -116,7 +122,6 @@ import org.apache.cassandra.service.AutoRepairService;
 import org.apache.cassandra.service.AutoRepairServiceMBean;
 import org.apache.cassandra.service.CacheService;
 import org.apache.cassandra.service.CacheServiceMBean;
-import org.apache.cassandra.service.snapshot.SnapshotManagerMBean;
 import org.apache.cassandra.service.GCInspector;
 import org.apache.cassandra.service.GCInspectorMXBean;
 import org.apache.cassandra.service.StorageProxy;
@@ -124,6 +129,7 @@ import org.apache.cassandra.service.StorageProxyMBean;
 import org.apache.cassandra.service.StorageServiceMBean;
 import org.apache.cassandra.service.accord.AccordOperations;
 import org.apache.cassandra.service.accord.AccordOperationsMBean;
+import org.apache.cassandra.service.snapshot.SnapshotManagerMBean;
 import org.apache.cassandra.streaming.StreamManagerMBean;
 import org.apache.cassandra.streaming.StreamState;
 import org.apache.cassandra.streaming.management.StreamStateCompositeData;
@@ -131,7 +137,6 @@ import org.apache.cassandra.tcm.CMSOperations;
 import org.apache.cassandra.tcm.CMSOperationsMBean;
 import org.apache.cassandra.tools.RepairRunner.RepairCmd;
 import org.apache.cassandra.tools.nodetool.GetTimeout;
-import org.apache.cassandra.tools.nodetool.formatter.TableBuilder;
 import org.apache.cassandra.utils.NativeLibrary;
 
 import static org.apache.cassandra.config.CassandraRelevantProperties.NODETOOL_JMX_NOTIFICATION_POLL_INTERVAL_SECONDS;
@@ -144,7 +149,7 @@ public class NodeProbe implements AutoCloseable
 {
     private static final String fmtUrl = "service:jmx:rmi:///jndi/rmi://%s:%d/jmxrmi";
     private static final String ssObjName = "org.apache.cassandra.db:type=StorageService";
-    private static final int defaultPort = 7199;
+    public static final int defaultPort = 7199;
 
     static long JMX_NOTIFICATION_POLL_INTERVAL_SECONDS = NODETOOL_JMX_NOTIFICATION_POLL_INTERVAL_SECONDS.getLong();
 
@@ -182,8 +187,8 @@ public class NodeProbe implements AutoCloseable
     protected PermissionsCacheMBean pcProxy;
     protected RolesCacheMBean rcProxy;
     protected AutoRepairServiceMBean autoRepairProxy;
-    protected Output output;
-    private boolean failed;
+    protected GuardrailsMBean grProxy;
+    protected volatile Output output;
 
     protected CIDRFilteringMetricsTableMBean cfmProxy;
 
@@ -329,6 +334,9 @@ public class NodeProbe implements AutoCloseable
 
             name = new ObjectName(AutoRepairService.MBEAN_NAME);
             autoRepairProxy = JMX.newMBeanProxy(mbeanServerConn, name, AutoRepairServiceMBean.class);
+
+            name = new ObjectName(Guardrails.MBEAN_NAME);
+            grProxy = JMX.newMBeanProxy(mbeanServerConn, name, GuardrailsMBean.class);
         }
         catch (MalformedObjectNameException e)
         {
@@ -383,9 +391,9 @@ public class NodeProbe implements AutoCloseable
         return ssProxy.scrub(disableSnapshot, skipCorrupted, checkData, reinsertOverflowedTTL, jobs, keyspaceName, tables);
     }
 
-    public int verify(boolean extendedVerify, boolean checkVersion, boolean diskFailurePolicy, boolean mutateRepairStatus, boolean checkOwnsTokens, boolean quick, String keyspaceName, String... tableNames) throws IOException, ExecutionException, InterruptedException
+    public int verify(boolean extendedVerify, boolean checkVersion, boolean diskFailurePolicy, boolean mutateRepairStatus, boolean checkOwnsTokens, boolean quick, boolean onlySai, boolean includeSai, String keyspaceName, String... tableNames) throws IOException, ExecutionException, InterruptedException
     {
-        return ssProxy.verify(extendedVerify, checkVersion, diskFailurePolicy, mutateRepairStatus, checkOwnsTokens, quick, keyspaceName, tableNames);
+        return ssProxy.verify(extendedVerify, checkVersion, diskFailurePolicy, mutateRepairStatus, checkOwnsTokens, quick, onlySai, includeSai, keyspaceName, tableNames);
     }
 
     public int upgradeSSTables(String keyspaceName, boolean excludeCurrentVersion, long maxSSTableTimestamp, int jobs, String... tableNames) throws IOException, ExecutionException, InterruptedException
@@ -426,10 +434,10 @@ public class NodeProbe implements AutoCloseable
                 "scrubbing");
     }
 
-    public void verify(PrintStream out, boolean extendedVerify, boolean checkVersion, boolean diskFailurePolicy, boolean mutateRepairStatus, boolean checkOwnsTokens, boolean quick, String keyspaceName, String... tableNames) throws IOException, ExecutionException, InterruptedException
+    public void verify(PrintStream out, boolean extendedVerify, boolean checkVersion, boolean diskFailurePolicy, boolean mutateRepairStatus, boolean checkOwnsTokens, boolean quick, boolean onlySai, boolean includeSai, String keyspaceName, String... tableNames) throws IOException, ExecutionException, InterruptedException
     {
         perform(out, keyspaceName,
-                () -> verify(extendedVerify, checkVersion, diskFailurePolicy, mutateRepairStatus, checkOwnsTokens, quick, keyspaceName, tableNames),
+                () -> verify(extendedVerify, checkVersion, diskFailurePolicy, mutateRepairStatus, checkOwnsTokens, quick, onlySai, includeSai, keyspaceName, tableNames),
                 "verifying");
     }
 
@@ -463,9 +471,8 @@ public class NodeProbe implements AutoCloseable
                            jobName, ks);
                 break;
             case 2:
-                failed = true;
-                out.printf("Failed marking some sstables compacting in keyspace %s, check server logs for more information.\n",
-                           ks);
+                out.printf("Failed marking some sstables compacting in keyspace %s, check server logs for more information.\n", ks);
+                throw new RuntimeException(String.format("Failed marking some sstables compacting in keyspace %s, check server logs for more information.\n", ks));
         }
     }
 
@@ -473,8 +480,8 @@ public class NodeProbe implements AutoCloseable
     {
         if (garbageCollect(tombstoneOption, jobs, keyspaceName, tableNames) != 0)
         {
-            failed = true;
             out.println("Aborted garbage collection for at least one table in keyspace " + keyspaceName + ", check server logs for more information.");
+            throw new RuntimeException("Aborted garbage collection for at least one table in keyspace " + keyspaceName + ", check server logs for more information.");
         }
     }
 
@@ -1813,16 +1820,6 @@ public class NodeProbe implements AutoCloseable
         ssProxy.reloadLocalSchema();
     }
 
-    public boolean isFailed()
-    {
-        return failed;
-    }
-
-    public void failed()
-    {
-        this.failed = true;
-    }
-
     public long getReadRepairAttempted()
     {
         return spProxy.getReadRepairAttempted();
@@ -2091,6 +2088,7 @@ public class NodeProbe implements AutoCloseable
                 case "BloomFilterFalseRatio":
                 case "BloomFilterOffHeapMemoryUsed":
                 case "IndexSummaryOffHeapMemoryUsed":
+                case "CompressionDictionariesMemoryUsed":
                 case "CompressionMetadataOffHeapMemoryUsed":
                 case "CompressionRatio":
                 case "EstimatedColumnCountHistogram":
@@ -2540,21 +2538,6 @@ public class NodeProbe implements AutoCloseable
         return ssProxy.getDefaultKeyspaceReplicationFactor();
     }
 
-    public void printSet(PrintStream out, String colName, Set<String> values)
-    {
-        if (values == null || values.isEmpty())
-            return;
-
-        TableBuilder table = new TableBuilder();
-
-        table.add(colName + ": ");
-
-        for (String value : values)
-            table.add(value);
-
-        table.printTo(out);
-    }
-
     public void abortBootstrap(String nodeId, String endpoint)
     {
         ssProxy.abortBootstrap(nodeId, endpoint);
@@ -2693,6 +2676,146 @@ public class NodeProbe implements AutoCloseable
     public void setAutoRepairRetryBackoff(String repairType, String interval)
     {
         autoRepairProxy.setAutoRepairRetryBackoff(repairType, interval);
+    }
+
+    public GuardrailsMBean getGuardrailsMBean()
+    {
+        return grProxy;
+    }
+
+    public void setMixedMajorVersionRepairEnabled(boolean enabled)
+    {
+        autoRepairProxy.setMixedMajorVersionRepairEnabled(enabled);
+    }
+
+    /**
+     * Triggers compression dictionary training for the specified table.
+     * Samples chunks from existing SSTables and trains a dictionary.
+     *
+     * @param keyspace the keyspace name
+     * @param table the table name
+     * @param force force the dictionary training even if there are not enough samples
+     * @throws IOException if there's an error accessing the MBean
+     * @throws IllegalArgumentException if table doesn't support dictionary compression
+     */
+    public void trainCompressionDictionary(String keyspace, String table, boolean force) throws IOException
+    {
+        doWithCompressionDictionaryManagerMBean(proxy -> { proxy.train(force); return null; }, keyspace, table);
+    }
+
+    /**
+     * Returns latest dictionary for given keyspace and table.
+     *
+     * @param keyspace the keyspace name
+     * @param table the table name
+     * @return the latest dictionary for given keyspace and table
+     * @throws IOException if there's an error accessing the MBean
+     * @throws IllegalArgumentException if table doesn't support dictionary compression
+     */
+    public CompositeData getCompressionDictionary(String keyspace, String table) throws IOException
+    {
+        return doWithCompressionDictionaryManagerMBean(CompressionDictionaryManagerMBean::getCompressionDictionary, keyspace, table);
+    }
+
+    /**
+     * Returns the dictionary for given keyspace and table and dictionary id.
+     *
+     * @param keyspace the keyspace name
+     * @param table the table name
+     * @param dictId id of dictionary to get
+     * @return the dictionary for given keyspace and table and dictionary id.
+     * @throws IOException if there's an error accessing the MBean
+     * @throws IllegalArgumentException if table doesn't support dictionary compression
+     */
+    public CompositeData getCompressionDictionary(String keyspace, String table, long dictId) throws IOException
+    {
+        return doWithCompressionDictionaryManagerMBean(proxy -> proxy.getCompressionDictionary(dictId), keyspace, table);
+    }
+
+    /**
+     * Imports dictionary in composite data to database.
+     *
+     * @param compositeData data to import
+     * @throws IOException if there's an error accessing the MBean
+     * @throws IllegalArgumentException if keyspace and table values in compositeData are missing
+     * or if table doesn't support dictionary compression
+     */
+    public void importCompressionDictionary(CompositeData compositeData) throws IOException
+    {
+        String keyspace = (String) compositeData.get(CompressionDictionaryDetailsTabularData.KEYSPACE_NAME);
+        String table = (String) compositeData.get(CompressionDictionaryDetailsTabularData.TABLE_NAME);
+
+        if (keyspace == null || table == null)
+        {
+            throw new IllegalArgumentException("Argument must have keyspace and table values.");
+        }
+
+        doWithCompressionDictionaryManagerMBean(proxy -> { proxy.importCompressionDictionary(compositeData); return null; }, keyspace, table);
+    }
+
+    /**
+     *
+     * @param keyspace keyspace to list dictionaries for
+     * @param table table to list dictionaries for
+     * @return tabular data with listing
+     * @throws IOException if there's an error accessing the MBean
+     * @throws IllegalArgumentException if table doesn't support dictionary compression
+     */
+    public TabularData listCompressionDictionaries(String keyspace, String table) throws IOException
+    {
+        return doWithCompressionDictionaryManagerMBean(CompressionDictionaryManagerMBean::listCompressionDictionaries, keyspace, table);
+    }
+
+    private <T> T doWithCompressionDictionaryManagerMBean(Function<CompressionDictionaryManagerMBean, T> func,
+                                                          String keyspace, String table) throws IOException
+    {
+        try
+        {
+            return func.apply(getDictionaryManagerProxy(keyspace, table));
+        }
+        catch (Exception e)
+        {
+            if (e.getCause() instanceof InstanceNotFoundException)
+            {
+                String message = String.format("Table %s.%s does not exist or does not support dictionary compression",
+                                               keyspace, table);
+                throw new IllegalArgumentException(message);
+            }
+            else
+            {
+                throw new IOException(e.getMessage());
+            }
+        }
+    }
+
+    /**
+     * Gets the compression dictionary training state for the specified table.
+     * Returns an atomic snapshot of training status, progress, and failure details.
+     *
+     * @param keyspace the keyspace name
+     * @param table the table name
+     * @return the current training state
+     * @throws IOException if there's an error accessing the MBean
+     */
+    public TrainingState getCompressionDictionaryTrainingState(String keyspace, String table) throws IOException
+    {
+        CompositeData compositeData = getDictionaryManagerProxy(keyspace, table).getTrainingState();
+        return TrainingState.fromCompositeData(compositeData);
+    }
+
+    private CompressionDictionaryManagerMBean getDictionaryManagerProxy(String keyspace, String table) throws IOException
+    {
+        // Construct table-specific MBean name
+        String mbeanName = CompressionDictionaryManagerMBean.MBEAN_NAME + ",keyspace=" + keyspace + ",table=" + table;
+        try
+        {
+            ObjectName objectName = new ObjectName(mbeanName);
+            return JMX.newMBeanProxy(mbeanServerConn, objectName, CompressionDictionaryManagerMBean.class);
+        }
+        catch (MalformedObjectNameException e)
+        {
+            throw new IOException("Invalid keyspace or table name", e);
+        }
     }
 }
 

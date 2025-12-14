@@ -19,25 +19,31 @@
 package org.apache.cassandra.service.accord;
 
 import java.io.IOException;
-import java.util.HashMap;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.function.BiConsumer;
+
+import javax.annotation.Nullable;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Predicates;
 import com.google.common.collect.Iterators;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import com.google.common.primitives.Ints;
 
-import accord.api.ConfigurationService;
+import accord.api.TopologyListener;
 import accord.local.Node;
 import accord.primitives.Range;
 import accord.primitives.Ranges;
 import accord.topology.Topology;
+import accord.topology.TopologyManager;
 import accord.utils.Invariants;
-import accord.utils.async.AsyncResult;
-import org.agrona.collections.Int2ObjectHashMap;
+import accord.utils.ReducingRangeMap;
+import org.agrona.collections.Long2LongHashMap;
 import org.apache.cassandra.db.TypeSizes;
 import org.apache.cassandra.io.UnversionedSerializer;
 import org.apache.cassandra.io.util.DataInputPlus;
@@ -58,68 +64,63 @@ import static org.apache.cassandra.service.accord.api.AccordWaitStrategies.retry
 /**
  * Collects watermarks of closed and retired epochs per range, and synced epochs per node.
  */
-public class WatermarkCollector implements ConfigurationService.Listener
+public class WatermarkCollector implements TopologyListener
 {
-    private static final Logger logger = LoggerFactory.getLogger(WatermarkCollector.class);
+    private static final Comparator<Map.Entry<Range, Long>> sortByEpochThenRange = (a, b) -> {
+        int c = Long.compareUnsigned(a.getValue(), b.getValue());
+        if (c == 0) c = a.getKey().compare(b.getKey());
+        return c;
+    };
 
-    final Map<Range, Long> closed;
-    final Map<Range, Long> retired;
-    final Int2ObjectHashMap<Long> synced;
+    ReducingRangeMap<Long> closed;
+    ReducingRangeMap<Long> retired;
+    final Long2LongHashMap synced;
 
     WatermarkCollector()
     {
-        closed = new HashMap<>();
-        retired = new HashMap<>();
-        synced = new Int2ObjectHashMap<>();
-    }
-
-    @Override public AsyncResult<Void> onTopologyUpdate(Topology topology, boolean isLoad, boolean startSync)
-    {
-        return null;
+        closed = new ReducingRangeMap<>();
+        retired = new ReducingRangeMap<>();
+        synced = new Long2LongHashMap(-1);
     }
 
     @Override
-    public void onRemoteSyncComplete(Node.Id node, long epoch)
+    public synchronized void onRemoteReadyToCoordinate(Node.Id node, long epoch)
     {
-        synced.compute(node.id, (k, prev) -> prev == null ? epoch : Long.max(prev, epoch));
+        synced.compute(node.id, (k, prev) -> prev == -1 ? epoch : Long.max(prev, epoch));
     }
 
     @Override
-    public void onEpochClosed(Ranges ranges, long epoch)
+    public synchronized void onEpochClosed(Ranges ranges, long epoch, @Nullable Topology topology)
     {
-        synchronized (this)
-        {
-            for (Range range : ranges)
-                this.closed.compute(range, (k, prev) -> prev == null ? epoch : Long.max(prev, epoch));
-        }
+        closed = ReducingRangeMap.merge(closed, ReducingRangeMap.create(ranges, epoch), Long::max);
     }
 
     @Override
-    public void onEpochRetired(Ranges ranges, long epoch)
+    public synchronized void onEpochRetired(Ranges ranges, long epoch, @Nullable Topology topology)
     {
-        synchronized (this)
-        {
-            for (Range range : ranges)
-                this.retired.compute(range, (k, prev) -> prev == null ? epoch : Long.max(prev, epoch));
-        }
+        retired = ReducingRangeMap.merge(retired, ReducingRangeMap.create(ranges, epoch), Long::max);
     }
 
-    public final IVerbHandler<Void> handler = new IVerbHandler<Void>()
+    public final IVerbHandler<Void> handler = new IVerbHandler<>()
     {
-        public void doVerb(Message<Void> message) throws IOException
+        public void doVerb(Message<Void> message)
         {
             Invariants.require(AccordService.started());
             Snapshot snapshot;
             synchronized (WatermarkCollector.this)
             {
-                snapshot = new Snapshot(new HashMap<>(closed), new HashMap<>(retired), new Int2ObjectHashMap<>(synced));
+                List<Map.Entry<Range, Long>> closedSnapshot = closed.foldlWithBounds((epoch, list, start, end) -> { list.add(Map.entry(start.rangeFactory().newRange(start, end), epoch)); return list; }, new ArrayList<>(), Predicates.alwaysFalse());
+                List<Map.Entry<Range, Long>> retiredSnapshot = retired.foldlWithBounds((epoch, list, start, end) -> { list.add(Map.entry(start.rangeFactory().newRange(start, end), epoch)); return list; }, new ArrayList<>(), Predicates.alwaysFalse());
+                Long2LongHashMap syncedSnapshot = new Long2LongHashMap(synced.size(), 0.6f, -1);
+                syncedSnapshot.putAll(synced);
+                snapshot = new Snapshot(closedSnapshot, retiredSnapshot, syncedSnapshot);
             }
             MessagingService.instance().respond(snapshot, message);
         }
     };
 
     @VisibleForTesting
-    static void fetchAndReportWatermarksAsync(AccordConfigurationService configService)
+    static void fetchAndReportWatermarksAsync(TopologyManager topologyManager)
     {
         SharedContext context = SharedContext.Global.instance;
         Set<InetAddressAndPort> peers = new HashSet<>();
@@ -135,39 +136,49 @@ public class WatermarkCollector implements ConfigurationService.Listener
                                                                  MessageDelivery.RetryErrorMessage.EMPTY)
                .addCallback((m, fail) -> {
                    if (fail != null)
-                   {
                        return;
-                   }
+
                    Snapshot snapshot = m.payload;
-                   long minEpoch = configService.minEpoch();
-                   for (Map.Entry<Range, Long> e : snapshot.closed.entrySet())
+                   forEachEpoch(topologyManager::onEpochClosed, snapshot.closed);
+                   forEachEpoch(topologyManager::onEpochRetired, snapshot.retired);
+                   for (Map.Entry<Long, Long> e : snapshot.synced.entrySet())
                    {
-                       Ranges r = Ranges.of(e.getKey());
-                       for (long epoch = minEpoch; epoch <= e.getValue(); epoch++)
-                           configService.receiveClosed(r, e.getValue());
-                   }
-                   for (Map.Entry<Range, Long> e : snapshot.retired.entrySet())
-                   {
-                       Ranges r = Ranges.of(e.getKey());
-                       for (long epoch = minEpoch; epoch <= e.getValue(); epoch++)
-                           configService.receiveRetired(r, e.getValue());
-                   }
-                   for (Map.Entry<Integer, Long> e : snapshot.synced.entrySet())
-                   {
-                       Node.Id node = new Node.Id(e.getKey());
-                       for (long epoch = minEpoch; epoch <= e.getValue(); epoch++)
-                           configService.receiveRemoteSyncComplete(node, epoch);
+                       Node.Id node = new Node.Id(Ints.saturatedCast(e.getKey()));
+                       topologyManager.onReadyToCoordinate(node, e.getValue());
                    }
                });
     }
 
+    private static void forEachEpoch(BiConsumer<Ranges, Long> forEachEpoch, List<Map.Entry<Range, Long>> rangesAndEpochs)
+    {
+        if (rangesAndEpochs.isEmpty())
+            return;
+
+        rangesAndEpochs.sort(sortByEpochThenRange);
+        long collectingEpoch = rangesAndEpochs.get(0).getValue();
+        List<Range> ranges = new ArrayList<>();
+        for (Map.Entry<Range, Long> e : rangesAndEpochs)
+        {
+            Range range = e.getKey();
+            long epoch = e.getValue();
+            if (epoch != collectingEpoch)
+            {
+                forEachEpoch.accept(Ranges.of(ranges.toArray(Range[]::new)), collectingEpoch);
+                collectingEpoch = epoch;
+                ranges.clear();
+            }
+            ranges.add(range);
+        }
+        forEachEpoch.accept(Ranges.of(ranges.toArray(Range[]::new)), collectingEpoch);
+    }
+
     public static class Snapshot
     {
-        public final Map<Range, Long> closed;
-        public final Map<Range, Long> retired;
-        public final Int2ObjectHashMap<Long> synced;
+        public final List<Map.Entry<Range, Long>> closed;
+        public final List<Map.Entry<Range, Long>> retired;
+        public final Long2LongHashMap synced;
 
-        public Snapshot(Map<Range, Long> closed, Map<Range, Long> retired, Int2ObjectHashMap<Long> synced)
+        public Snapshot(List<Map.Entry<Range, Long>> closed, List<Map.Entry<Range, Long>> retired, Long2LongHashMap synced)
         {
             this.closed = closed;
             this.retired = retired;
@@ -196,21 +207,21 @@ public class WatermarkCollector implements ConfigurationService.Listener
         public void serialize(Snapshot t, DataOutputPlus out) throws IOException
         {
             out.writeUnsignedVInt32(t.closed.size());
-            for (Map.Entry<Range, Long> e : t.closed.entrySet())
+            for (Map.Entry<Range, Long> e : t.closed)
             {
                 TokenRange.serializer.serialize((TokenRange) e.getKey(), out);
                 out.writeUnsignedVInt(e.getValue());
             }
             out.writeUnsignedVInt32(t.retired.size());
-            for (Map.Entry<Range, Long> e : t.retired.entrySet())
+            for (Map.Entry<Range, Long> e : t.retired)
             {
                 TokenRange.serializer.serialize((TokenRange) e.getKey(), out);
                 out.writeUnsignedVInt(e.getValue());
             }
             out.writeUnsignedVInt32(t.synced.size());
-            for (Map.Entry<Integer, Long> e : t.synced.entrySet())
+            for (Map.Entry<Long, Long> e : t.synced.entrySet())
             {
-                out.writeUnsignedVInt32(e.getKey());
+                out.writeUnsignedVInt(e.getKey());
                 out.writeUnsignedVInt(e.getValue());
             }
         }
@@ -220,25 +231,20 @@ public class WatermarkCollector implements ConfigurationService.Listener
         public Snapshot deserialize(DataInputPlus in) throws IOException
         {
             int closedSize = in.readUnsignedVInt32();
-            Map<Range, Long> closed = new HashMap<>();
+            List<Map.Entry<Range, Long>> closed = new ArrayList<>();
             for (int i = 0; i < closedSize; i++)
-            {
-                closed.put(TokenRange.serializer.deserialize(in),
-                           in.readUnsignedVInt());
-            }
+                closed.add(Map.entry(TokenRange.serializer.deserialize(in), in.readUnsignedVInt()));
+
             int retiredSize = in.readUnsignedVInt32();
-            Map<Range, Long> retired = new HashMap<>();
+            List<Map.Entry<Range, Long>> retired = new ArrayList<>();
             for (int i = 0; i < retiredSize; i++)
-            {
-                retired.put(TokenRange.serializer.deserialize(in),
-                            in.readUnsignedVInt());
-            }
+                retired.add(Map.entry(TokenRange.serializer.deserialize(in), in.readUnsignedVInt()));
+
             int syncedSize = in.readUnsignedVInt32();
-            Int2ObjectHashMap<Long> synced = new Int2ObjectHashMap<>();
+            Long2LongHashMap synced = new Long2LongHashMap(-1);
             for (int i = 0; i < syncedSize; i++)
             {
-                synced.put(in.readUnsignedVInt32(),
-                           (Long) in.readUnsignedVInt());
+                synced.put(in.readUnsignedVInt(), in.readUnsignedVInt());
             }
             return new Snapshot(closed, retired, synced);
         }
@@ -248,19 +254,19 @@ public class WatermarkCollector implements ConfigurationService.Listener
         {
             int size = 0;
             size += TypeSizes.sizeofUnsignedVInt(t.closed.size());
-            for (Map.Entry<Range, Long> e : t.closed.entrySet())
+            for (Map.Entry<Range, Long> e : t.closed)
             {
                 size += TokenRange.serializer.serializedSize((TokenRange) e.getKey());
                 size += TypeSizes.sizeofUnsignedVInt(e.getValue());
             }
             size += TypeSizes.sizeofUnsignedVInt(t.retired.size());
-            for (Map.Entry<Range, Long> e : t.retired.entrySet())
+            for (Map.Entry<Range, Long> e : t.retired)
             {
                 size += TokenRange.serializer.serializedSize((TokenRange) e.getKey());
                 size += TypeSizes.sizeofUnsignedVInt(e.getValue());
             }
             size += TypeSizes.sizeofUnsignedVInt(t.synced.size());
-            for (Map.Entry<Integer, Long> e : t.synced.entrySet())
+            for (Map.Entry<Long, Long> e : t.synced.entrySet())
             {
                 size += TypeSizes.sizeofUnsignedVInt(e.getKey());
                 size += TypeSizes.sizeofUnsignedVInt(e.getValue());

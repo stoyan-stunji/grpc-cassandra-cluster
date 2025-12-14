@@ -31,7 +31,6 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
-import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
@@ -49,6 +48,9 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableList;
 import com.google.common.util.concurrent.Futures;
+
+import accord.topology.EpochReady;
+import org.agrona.collections.IntArrayList;
 import org.apache.cassandra.tcm.compatibility.TokenRingUtils;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.Shared;
@@ -188,6 +190,20 @@ public class ClusterUtils
     }
 
     /**
+     * Restart an instance in a blocking manner.
+     *
+     * @param instance the instance to restart
+     */
+    public static void restartUnchecked(IInstance instance)
+    {
+        logger.info("Stopping instance {} to restart it", instance);
+        stopUnchecked(instance);
+        logger.info("Instance {} stopped, trying to start it now", instance);
+        instance.startup();
+        logger.info("Instance {} startup was success", instance);
+    }
+
+    /**
      * Create a new instance and add it to the cluster, without starting it.
      *
      * @param cluster to add to
@@ -321,11 +337,26 @@ public class ClusterUtils
                                                               I toReplace,
                                                               BiConsumer<I, WithProperties> fn)
     {
-        IInstanceConfig toReplaceConf = toReplace.config();
-        I inst = addInstance(cluster, toReplaceConf, c -> c.set("auto_bootstrap", true)
-                                                           .set("progress_barrier_min_consistency_level", ConsistencyLevel.ONE));
-        return startHostReplacement(toReplace, inst, fn);
+        return replaceHostAndStart(cluster, toReplace, fn, ignore -> {});
+    }
 
+    public static <I extends IInstance> I replaceHostAndStart(AbstractCluster<I> cluster,
+                                                              I toReplace,
+                                                              BiConsumer<I, WithProperties> fn,
+                                                              Consumer<IInstanceConfig> configFn)
+    {
+        IInstanceConfig toReplaceConf = toReplace.config();
+        I inst = addInstance(cluster, toReplaceConf, c -> {
+            c.set("auto_bootstrap", true)
+             .set("progress_barrier_min_consistency_level", ConsistencyLevel.ONE);
+            configFn.accept(c);
+        });
+        return startHostReplacement(toReplace, inst, fn);
+    }
+
+    public static <I extends IInstance> I startHostReplacement(I toReplace, I inst)
+    {
+        return startHostReplacement(toReplace, inst, (i1, i2) -> {});
     }
 
     /**
@@ -673,10 +704,21 @@ public class ClusterUtils
         waitForCMSToQuiesce(cluster, maxEpoch(cluster, cmsNodes));
     }
 
-    public static Epoch maxEpoch(ICluster<IInvokableInstance> cluster, int[] cmsNodes)
+    public static Epoch maxEpoch(ICluster<IInvokableInstance> cluster)
+    {
+        IntArrayList up = new IntArrayList();
+        for (var inst : cluster)
+        {
+            if (inst.isShutdown()) continue;
+            up.add(inst.config().num());
+        }
+        return maxEpoch(cluster, up.toIntArray());
+    }
+
+    public static Epoch maxEpoch(ICluster<IInvokableInstance> cluster, int... nodes)
     {
         Epoch max = null;
-        for (int id : cmsNodes)
+        for (int id : nodes)
         {
             IInvokableInstance inst = cluster.get(id);
             if (inst.isShutdown()) continue;
@@ -685,7 +727,7 @@ public class ClusterUtils
                 max = version;
         }
         if (max == null)
-            throw new AssertionError("Unable to find max epoch from " + cmsNodes);
+            throw new AssertionError("Unable to find max epoch from " + Arrays.toString(nodes));
         return max;
     }
 
@@ -1302,11 +1344,7 @@ public class ClusterUtils
      */
     public static File getCommitLogDirectory(IInstance instance)
     {
-        IInstanceConfig conf = instance.config();
-        // this isn't safe as it assumes the implementation of InstanceConfig
-        // might need to get smarter... some day...
-        String d = (String) conf.get("commitlog_directory");
-        return new File(d);
+        return getDirectory(instance, "commitlog_directory");
     }
 
     /**
@@ -1317,11 +1355,7 @@ public class ClusterUtils
      */
     public static File getHintsDirectory(IInstance instance)
     {
-        IInstanceConfig conf = instance.config();
-        // this isn't safe as it assumes the implementation of InstanceConfig
-        // might need to get smarter... some day...
-        String d = (String) conf.get("hints_directory");
-        return new File(d);
+        return getDirectory(instance, "hints_directory");
     }
 
     /**
@@ -1332,10 +1366,32 @@ public class ClusterUtils
      */
     public static File getSavedCachesDirectory(IInstance instance)
     {
+        return getDirectory(instance, "saved_caches_directory");
+    }
+
+    /**
+     * Get the journal directory for the given instance.
+     * This directory is used by the Accord consensus protocol to store its journal files.
+     *
+     * @param instance to get the journal directory for
+     * @return journal directory
+     */
+    public static File getJournalDirectory(IInstance instance)
+    {
+        return getDirectory(instance, "accord.journal_directory");
+    }
+
+    public static File getCdcRawDirectory(IInstance instance)
+    {
+        return getDirectory(instance, "cdc_raw_directory");
+    }
+
+    private static File getDirectory(IInstance instance, String key)
+    {
         IInstanceConfig conf = instance.config();
         // this isn't safe as it assumes the implementation of InstanceConfig
         // might need to get smarter... some day...
-        String d = (String) conf.get("saved_caches_directory");
+        String d = (String) conf.get(key);
         return new File(d);
     }
 
@@ -1352,7 +1408,25 @@ public class ClusterUtils
         out.add(getCommitLogDirectory(instance));
         out.add(getHintsDirectory(instance));
         out.add(getSavedCachesDirectory(instance));
+        out.add(getJournalDirectory(instance));
+        out.add(getCdcRawDirectory(instance));
         return out;
+    }
+
+    /**
+     * Stops the instance then deletes all directories, effectively resets the instance to a clean state.
+     *
+     * @param inst the instance to clean up
+     */
+    public static void cleanup(IInvokableInstance inst)
+    {
+        stopUnchecked(inst);
+        for (var f : getDirectories(inst))
+        {
+            if (f.exists())
+                f.deleteRecursive();
+        }
+        inst.startup();
     }
 
     /**
@@ -1630,7 +1704,7 @@ public class ClusterUtils
     public static TableId tableId(Cluster cluster, String ks, String table)
     {
         String str = cluster.getFirstRunningInstance().callOnInstance(() -> Schema.instance.getKeyspaceInstance(ks).getColumnFamilyStore(table).getTableId().toString());
-        return TableId.fromUUID(UUID.fromString(str));
+        return TableId.fromString(str);
     }
 
     public static void awaitAccordEpochReady(Cluster cluster, long epoch)
@@ -1640,7 +1714,7 @@ public class ClusterUtils
             i.runOnInstance(() -> {
                 try
                 {
-                    AccordService.instance().epochReady(Epoch.create(epoch)).get();
+                    AccordService.instance().epochReady(Epoch.create(epoch), EpochReady::reads).get();
                 }
                 catch (InterruptedException | ExecutionException e)
                 {

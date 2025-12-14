@@ -51,6 +51,7 @@ import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
+import org.apache.cassandra.db.rows.UnfilteredRowIterator;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.exceptions.ConfigurationException;
@@ -286,7 +287,12 @@ public class LeveledCompactionStrategyTest
         ISSTableScanner scanner = scanners.get(0);
         // scan through to the end
         while (scanner.hasNext())
-            scanner.next();
+        {
+            try (UnfilteredRowIterator ignored = scanner.next())
+            {
+                // just close the iterator
+            }
+        }
 
         // scanner.getCurrentPosition should be equal to total bytes of L1 sstables
         assertEquals(scanner.getCurrentPosition(), SSTableReader.getTotalUncompressedBytes(sstables));
@@ -599,9 +605,20 @@ public class LeveledCompactionStrategyTest
                 {
                     try
                     {
-                        assertTrue(task instanceof LeveledCompactionTask);
-                        LeveledCompactionTask lcsTask = (LeveledCompactionTask) task;
-                        level = Math.max(level, lcsTask.getLevel());
+                        if (task instanceof LeveledCompactionTask)
+                        {
+                            LeveledCompactionTask lcsTask = (LeveledCompactionTask) task;
+                            level = Math.max(level, lcsTask.getLevel());
+                        }
+                        else if (task instanceof SingleSSTableLCSTask)
+                        {
+                            SingleSSTableLCSTask singleSSTableLCSTask = (SingleSSTableLCSTask) task;
+                            level = Math.max(level, singleSSTableLCSTask.getLevel());
+                        }
+                        else
+                        {
+                            Assert.fail("Got unexpected task of type " + task.getClass().getCanonicalName());
+                        }
                     }
                     finally
                     {
@@ -955,6 +972,24 @@ public class LeveledCompactionStrategyTest
                 }
             }
             assertFalse(removed);
+        }
+    }
+
+    @Test()
+    public void testInvalidFanoutAndSSTableSize()
+    {
+        try
+        {
+            Map<String, String> options = new HashMap<>();
+            options.put("class", "LeveledCompactionStrategy");
+            options.put("fanout_size", "90");
+            options.put("sstable_size_in_mb", "1089");
+            LeveledCompactionStrategy.validateOptions(options);
+            Assert.fail("fanout_sizeed and sstable_size_in_mb are invalid, but did not throw ConfigurationException");
+        }
+        catch (ConfigurationException e)
+        {
+            assertTrue(e.getMessage().contains("your maxSSTableSize must be absurdly high to compute"));
         }
     }
 

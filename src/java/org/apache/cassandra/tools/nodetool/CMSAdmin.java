@@ -27,13 +27,14 @@ import java.util.Map;
 
 import com.google.common.collect.ImmutableList;
 
-import io.airlift.airline.Arguments;
-import io.airlift.airline.Command;
-import io.airlift.airline.Option;
 import org.apache.cassandra.tcm.Epoch;
 import org.apache.cassandra.tools.NodeProbe;
-import org.apache.cassandra.tools.NodeTool;
+import org.apache.cassandra.tools.nodetool.layout.CassandraUsage;
+import picocli.CommandLine.Command;
+import picocli.CommandLine.Option;
+import picocli.CommandLine.Parameters;
 
+import static org.apache.cassandra.tcm.CMSOperations.CMS_ID;
 import static org.apache.cassandra.tcm.CMSOperations.COMMITS_PAUSED;
 import static org.apache.cassandra.tcm.CMSOperations.EPOCH;
 import static org.apache.cassandra.tcm.CMSOperations.IS_MEMBER;
@@ -44,16 +45,36 @@ import static org.apache.cassandra.tcm.CMSOperations.NEEDS_RECONFIGURATION;
 import static org.apache.cassandra.tcm.CMSOperations.REPLICATION_FACTOR;
 import static org.apache.cassandra.tcm.CMSOperations.SERVICE_STATE;
 
-public abstract class CMSAdmin extends NodeTool.NodeToolCmd
+@Command(name = "cms", description = "Manage cluster metadata",
+         subcommands = { CMSAdmin.DescribeCMS.class,
+                         CMSAdmin.InitializeCMS.class,
+                         CMSAdmin.ReconfigureCMS.class,
+                         CMSAdmin.Snapshot.class,
+                         CMSAdmin.Unregister.class,
+                         CMSAdmin.AbortInitialization.class,
+                         CMSAdmin.DumpDirectory.class,
+                         CMSAdmin.DumpLog.class,
+                         CMSAdmin.ResumeDropAccordTable.class })
+public class CMSAdmin extends AbstractCommand
 {
+    @Override
+    protected void execute(NodeProbe probe)
+    {
+        AbstractCommand cmd = new DescribeCMS();
+        cmd.probe(probe);
+        cmd.logger(output);
+        cmd.run();
+    }
+
     @Command(name = "describe", description = "Describe the current Cluster Metadata Service")
-    public static class DescribeCMS extends NodeTool.NodeToolCmd
+    public static class DescribeCMS extends AbstractCommand
     {
         @Override
         protected void execute(NodeProbe probe)
         {
             Map<String, String> info = probe.getCMSOperationsProxy().describeCMS();
             output.out.printf("Cluster Metadata Service:%n");
+            output.out.printf("CMS Identifier: %s%n", info.get(CMS_ID));
             output.out.printf("Members: %s%n", info.get(MEMBERS));
             output.out.printf("Needs reconfiguration: %s%n", info.get(NEEDS_RECONFIGURATION));
             output.out.printf("Is Member: %s%n", info.get(IS_MEMBER));
@@ -67,9 +88,9 @@ public abstract class CMSAdmin extends NodeTool.NodeToolCmd
     }
 
     @Command(name = "initialize", description = "Upgrade from gossip and initialize CMS")
-    public static class InitializeCMS extends NodeTool.NodeToolCmd
+    public static class InitializeCMS extends AbstractCommand
     {
-        @Option(title = "ignored endpoints", name = { "-i", "--ignore"}, description = "Hosts to ignore due to them being down")
+        @Option(paramLabel = "ignored_endpoints", names = { "-i", "--ignore" }, description = "Hosts to ignore due to them being down")
         private List<String> endpoint = new ArrayList<>();
 
         @Override
@@ -80,24 +101,25 @@ public abstract class CMSAdmin extends NodeTool.NodeToolCmd
     }
 
     @Command(name = "reconfigure", description = "Reconfigure replication factor of CMS")
-    public static class ReconfigureCMS extends NodeTool.NodeToolCmd
+    public static class ReconfigureCMS extends AbstractCommand
     {
-        @Option(title = "status",
-        name = {"--status"},
-        description = "Poll status of the reconfigure command. All other flags and arguments are ignored when this one is used.")
+        @Option(paramLabel = "status",
+                names = { "--status" },
+                description = "Poll status of the reconfigure command. All other flags and arguments are ignored when this one is used.")
         private boolean status = false;
 
-        @Option(title = "resume",
-        name = {"-r", "--resume"},
-        description = "Whether or not a previously interrupted sequence should be resumed")
+        @Option(paramLabel = "resume",
+                names = { "-r", "--resume" },
+                description = "Whether or not a previously interrupted sequence should be resumed")
         private boolean resume = false;
 
-        @Option(title = "cancel",
-        name = {"-c", "--cancel"},
-        description = "Cancels any in progress CMS reconfiguration")
+        @Option(paramLabel = "cancel",
+                names = { "-c", "--cancel" },
+                description = "Cancels any in progress CMS reconfiguration")
         private boolean cancel = false;
 
-        @Arguments(usage = "[<replication factor>] or <datacenter>:<replication_factor> ... ", description = "Replication factor of new CMS")
+        @CassandraUsage(usage = "[<replication factor>] or <datacenter>:<replication_factor> ... ", description = "Replication factor of new CMS")
+        @Parameters(paramLabel = "replication_factor", description = "Replication factors of new CMS in format <replication factor> or <datacenter>:<replication_factor>")
         private List<String> args = new ArrayList<>();
 
         @Override
@@ -178,7 +200,7 @@ public abstract class CMSAdmin extends NodeTool.NodeToolCmd
     }
 
     @Command(name = "snapshot", description = "Request a checkpointing snapshot of cluster metadata")
-    public static class Snapshot extends NodeTool.NodeToolCmd
+    public static class Snapshot extends AbstractCommand
     {
         @Override
         public void execute(NodeProbe probe)
@@ -188,10 +210,10 @@ public abstract class CMSAdmin extends NodeTool.NodeToolCmd
     }
 
     @Command(name = "unregister", description = "Unregister nodes in LEFT state")
-    public static class Unregister extends NodeTool.NodeToolCmd
+    public static class Unregister extends AbstractCommand
     {
-        @Arguments(required = true, title = "Unregister nodes in LEFT state", description = "One or more nodeIds to unregister, they all need to be in LEFT state", usage = "<nodeId>+")
-        public List<String> nodeIds;
+        @Parameters(paramLabel = "nodeId", description = "One or more nodeIds to unregister, they all need to be in LEFT state", arity = "1..*")
+        private List<String> nodeIds;
 
         @Override
         protected void execute(NodeProbe probe)
@@ -201,9 +223,9 @@ public abstract class CMSAdmin extends NodeTool.NodeToolCmd
     }
 
     @Command(name = "abortinitialization", description = "Abort an incomplete initialization")
-    public static class AbortInitialization extends NodeTool.NodeToolCmd
+    public static class AbortInitialization extends AbstractCommand
     {
-        @Option(required = true, name = "--initiator", title = "Initiator", description = "The address of the node where `cms initialize` was run.")
+        @Option(required = true, names = { "--initiator" }, description = "The address of the node where `cms initialize` was run.")
         public String initiator;
 
         @Override
@@ -214,10 +236,11 @@ public abstract class CMSAdmin extends NodeTool.NodeToolCmd
     }
 
     @Command(name = "dumpdirectory", description = "Dump the directory from the current ClusterMetadata")
-    public static class DumpDirectory extends NodeTool.NodeToolCmd
+    public static class DumpDirectory extends AbstractCommand
     {
-        @Option(name = "--tokens", title = "Include tokens", description = "Include tokens in output")
+        @Option(names = { "--tokens" }, description = "Include tokens in output")
         public boolean tokens = false;
+
         @Override
         protected void execute(NodeProbe probe)
         {
@@ -226,12 +249,13 @@ public abstract class CMSAdmin extends NodeTool.NodeToolCmd
     }
 
     @Command(name = "dumplog", description = "Dump the metadata log")
-    public static class DumpLog extends NodeTool.NodeToolCmd
+    public static class DumpLog extends AbstractCommand
     {
-        @Option(name = "--start", title = "Start epoch")
+        @Option(names = { "--start" }, description = "Start epoch")
         long startEpoch = Epoch.FIRST.getEpoch();
-        @Option(name = "--end", title = "End epoch")
+        @Option(names = { "--end" }, description = "End epoch")
         long endEpoch = Long.MAX_VALUE;
+
         @Override
         protected void execute(NodeProbe probe)
         {
@@ -259,10 +283,11 @@ public abstract class CMSAdmin extends NodeTool.NodeToolCmd
     }
 
     @Command(name = "resumedropaccordtable", description = "Resume a drop accord table operation which has stalled")
-    public static class ResumeDropAccordTable extends NodeTool.NodeToolCmd
+    public static class ResumeDropAccordTable extends AbstractCommand
     {
-        @Arguments(usage = "[tableId]", description = "Table id of the table being dropped")
+        @Parameters(description = "Table id of the table being dropped")
         private String tableId;
+
         @Override
         public void execute(NodeProbe probe)
         {

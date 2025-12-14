@@ -18,8 +18,10 @@
 package org.apache.cassandra.tcm;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -37,6 +39,7 @@ import org.slf4j.LoggerFactory;
 import org.apache.cassandra.config.CassandraRelevantProperties;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.Mutation;
 import org.apache.cassandra.db.SystemKeyspace;
 import org.apache.cassandra.db.commitlog.CommitLog;
 import org.apache.cassandra.dht.BootStrapper;
@@ -49,18 +52,20 @@ import org.apache.cassandra.gms.NewGossiper;
 import org.apache.cassandra.gms.VersionedValue;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.net.MessagingService;
+import org.apache.cassandra.schema.DistributedSchema;
 import org.apache.cassandra.schema.KeyspaceMetadata;
+import org.apache.cassandra.schema.Keyspaces;
 import org.apache.cassandra.schema.SchemaConstants;
+import org.apache.cassandra.schema.SchemaKeyspace;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.service.StorageService;
-import org.apache.cassandra.service.accord.AccordService;
 import org.apache.cassandra.tcm.log.LocalLog;
 import org.apache.cassandra.tcm.log.LogStorage;
 import org.apache.cassandra.tcm.log.SystemKeyspaceStorage;
 import org.apache.cassandra.tcm.membership.NodeId;
 import org.apache.cassandra.tcm.membership.NodeState;
-import org.apache.cassandra.tcm.migration.Election;
 import org.apache.cassandra.tcm.migration.CMSInitializationRequest;
+import org.apache.cassandra.tcm.migration.Election;
 import org.apache.cassandra.tcm.ownership.UniformRangePlacement;
 import org.apache.cassandra.tcm.sequences.InProgressSequences;
 import org.apache.cassandra.tcm.sequences.ReconfigureCMS;
@@ -70,16 +75,16 @@ import org.apache.cassandra.tcm.transformations.PrepareReplace;
 import org.apache.cassandra.tcm.transformations.UnsafeJoin;
 import org.apache.cassandra.tcm.transformations.cms.Initialize;
 import org.apache.cassandra.utils.FBUtilities;
+import org.apache.cassandra.utils.Pair;
 
 import static org.apache.cassandra.tcm.ClusterMetadataService.State.LOCAL;
 import static org.apache.cassandra.tcm.compatibility.GossipHelper.emptyWithSchemaFromSystemTables;
 import static org.apache.cassandra.tcm.compatibility.GossipHelper.fromEndpointStates;
 import static org.apache.cassandra.tcm.membership.NodeState.JOINED;
 import static org.apache.cassandra.tcm.membership.NodeState.LEFT;
-import static org.apache.cassandra.tcm.membership.NodeState.REGISTERED;
 import static org.apache.cassandra.utils.FBUtilities.getBroadcastAddressAndPort;
 
- /**
+/**
   * Initialize
   */
  public class Startup
@@ -143,7 +148,6 @@ import static org.apache.cassandra.utils.FBUtilities.getBroadcastAddressAndPort;
         ClusterMetadataService.instance().log().bootstrap(addr, datacenter);
         ClusterMetadata metadata =  ClusterMetadata.current();
         assert ClusterMetadataService.state() == LOCAL : String.format("Can't initialize as node hasn't transitioned to CMS state. State: %s.\n%s", ClusterMetadataService.state(),  metadata);
-
         Initialize initialize = new Initialize(metadata.initializeClusterIdentifier(addr.hashCode()));
         ClusterMetadataService.instance().commit(initialize);
     }
@@ -185,7 +189,7 @@ import static org.apache.cassandra.utils.FBUtilities.getBroadcastAddressAndPort;
         for (KeyspaceMetadata keyspace : metadata.schema.getKeyspaces())
         {
             // Skip system as we've already cleaned it
-            if (keyspace.name.equals(SchemaConstants.SYSTEM_KEYSPACE_NAME))
+            if (keyspace.name.equals(SchemaConstants.SYSTEM_KEYSPACE_NAME) || keyspace.name.equals(SchemaConstants.ACCORD_KEYSPACE_NAME))
                 continue;
 
             for (TableMetadata cfm : keyspace.tables)
@@ -257,12 +261,26 @@ import static org.apache.cassandra.utils.FBUtilities.getBroadcastAddressAndPort;
         Election.instance.migrated();
     }
 
+    private static void updateSystemSchemaTables(Set<String> knownDatacenters)
+    {
+        List<Pair<KeyspaceMetadata, Long>> kss = DistributedSchema.distributedKeyspacesWithGeneration(knownDatacenters);
+        List<Mutation> mutations = new ArrayList<>();
+        for (Pair<KeyspaceMetadata, Long> ksm : kss)
+        {
+            Keyspaces.KeyspacesDiff ksDiff = Keyspaces.diff(Keyspaces.none(), Keyspaces.of(ksm.left));
+            mutations.addAll(SchemaKeyspace.convertSchemaDiffToMutations(ksDiff, ksm.right));
+        }
+        SchemaKeyspace.applyChanges(mutations);
+    }
+
     /**
      * This should only be called during startup.
      */
     public static void initializeFromGossip(Function<Processor, Processor> wrapProcessor, Runnable initMessaging) throws StartupException
     {
-        ClusterMetadata emptyFromSystemTables = emptyWithSchemaFromSystemTables(SystemKeyspace.allKnownDatacenters());
+        Set<String> knownDcs = SystemKeyspace.allKnownDatacenters();
+        updateSystemSchemaTables(knownDcs);
+        ClusterMetadata emptyFromSystemTables = emptyWithSchemaFromSystemTables(knownDcs);
         LocalLog.LogSpec logSpec = LocalLog.logSpec()
                                            .withInitialState(emptyFromSystemTables)
                                            .afterReplay(Startup::scrubDataDirectories,
@@ -423,9 +441,6 @@ import static org.apache.cassandra.utils.FBUtilities.getBroadcastAddressAndPort;
         metadata = ClusterMetadata.current();
 
         NodeState startingstate = metadata.directory.peerState(self);
-        if (startingstate != REGISTERED && startingstate != LEFT)
-            AccordService.startup(self);
-
         switch (startingstate)
         {
             case REGISTERED:
@@ -437,7 +452,6 @@ import static org.apache.cassandra.utils.FBUtilities.getBroadcastAddressAndPort;
                 // When Accord starts up it needs to check for any historic epochs that it needs to know about (in order
                 // to handle pending transactions), in order to know what nodes to check with it needs to know what the
                 // settled placement is (so it knows what peers to reach out to).
-                AccordService.startup(self);
                 InProgressSequences.finishInProgressSequences(self, true); // potentially finish the MSO committed above
                 metadata = ClusterMetadata.current();
 
@@ -453,7 +467,15 @@ import static org.apache.cassandra.utils.FBUtilities.getBroadcastAddressAndPort;
                 }
             case JOINED:
                 if (StorageService.isReplacingSameAddress())
+                {
+                    if (DatabaseDescriptor.getAccordTransactionsEnabled())
+                    {
+                        // TODO (required): we need to support a mode that changes the NodeId when replacing the same address for accord transaction safety
+                        throw new IllegalStateException("Cannot replace same address when accord transactions are enabled.");
+                    }
+
                     ReplaceSameAddress.streamData(self, metadata, shouldBootstrap, finishJoiningRing);
+                }
 
                 // JOINED appears before BOOTSTRAPPING & BOOT_REPLACE so we can fall
                 // through when we start as REGISTERED/LEFT and complete a full startup

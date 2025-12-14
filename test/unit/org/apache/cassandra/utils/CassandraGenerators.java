@@ -51,7 +51,7 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Sets;
 
-import org.apache.cassandra.db.compaction.LeveledManifest;
+import accord.utils.SortedArrays.SortedArrayList;
 import org.apache.cassandra.schema.*;
 import org.apache.cassandra.service.consensus.migration.ConsensusMigrationState;
 import org.apache.cassandra.tcm.extensions.ExtensionKey;
@@ -142,6 +142,7 @@ import static org.apache.cassandra.utils.Generators.SMALL_TIME_SPAN_NANOS;
 import static org.apache.cassandra.utils.Generators.TIMESTAMP_NANOS;
 import static org.apache.cassandra.utils.Generators.TINY_TIME_SPAN_NANOS;
 import static org.apache.cassandra.utils.Generators.directAndHeapBytes;
+import static org.junit.Assert.assertTrue;
 
 public final class CassandraGenerators
 {
@@ -584,11 +585,14 @@ public final class CassandraGenerators
                     try
                     {
                         // see org.apache.cassandra.db.compaction.LeveledGenerations.MAX_LEVEL_COUNT for why 8 is hard coded here
-                        LeveledManifest.maxBytesForLevel(8, value, maxSSTableSizeInBytes);
+                        // LeveledManifest.maxBytesForLevel(8, value, maxSSTableSizeInBytes);
+                        options.put(LeveledCompactionStrategy.LEVEL_FANOUT_SIZE_OPTION, value.toString());
+                        LeveledCompactionStrategy.validateOptions(options);
                         break; // value is good, keep it
                     }
-                    catch (RuntimeException e)
+                    catch (ConfigurationException e)
                     {
+                        assertTrue(e.getMessage().contains("your maxSSTableSize must be absurdly high to compute"));
                         // this value is too large... lets shrink it
                         if (value.intValue() == 1)
                             throw new AssertionError("There is no possible fanout size that works with maxSSTableSizeInMB=" + maxSSTableSizeInMB);
@@ -861,7 +865,8 @@ public final class CassandraGenerators
                                                        // Names are used for DCs and those are seperated by ,
                                                        .map(s -> s.replace(",", "_"))
                                                        .assuming(s -> !s.trim().isEmpty());
-                        int numNames = SourceDSL.integers().between(1, 10).generate(rnd);
+                        // DCs is optional, allow 0 dcs:
+                        int numNames = SourceDSL.integers().between(0, 10).generate(rnd);
                         for (int i = 0; i < numNames; i++)
                         {
                             while (!names.add(nameGen.generate(rnd)))
@@ -888,7 +893,8 @@ public final class CassandraGenerators
                         //      dcFormat: name | weight
                         //      weight: int: >= 0
                         //      note: can't mix auto and user defined weight; need one or the other.  Names must be unique
-                        map.put(ParameterizedFastPathStrategy.DCS, String.join(",", dcs));
+                        if (!dcs.isEmpty())
+                            map.put(ParameterizedFastPathStrategy.DCS, String.join(",", dcs));
                         return ParameterizedFastPathStrategy.fromMap(map);
                     }
                     default:
@@ -1870,7 +1876,7 @@ public final class CassandraGenerators
     {
         Gen<Set<Node.Id>> staleIdsGen = Generators.set(accordNodeId(), SourceDSL.integers().between(0, 10));
         Gen<Epoch> epochGen = epochs();
-        return rnd -> new AccordStaleReplicas(staleIdsGen.generate(rnd), epochGen.generate(rnd));
+        return rnd -> new AccordStaleReplicas(SortedArrayList.copyUnsorted(staleIdsGen.generate(rnd), Node.Id[]::new), SortedArrayList.ofSorted(), epochGen.generate(rnd));
     }
 
     public static Gen<AccordFastPath> accordFastPath()

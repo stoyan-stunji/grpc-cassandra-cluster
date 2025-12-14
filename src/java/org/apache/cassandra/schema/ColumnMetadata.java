@@ -65,6 +65,7 @@ import org.apache.cassandra.utils.ByteBufferUtil;
 
 import static org.apache.cassandra.db.TypeSizes.BOOL_SIZE;
 import static org.apache.cassandra.db.TypeSizes.sizeof;
+import static org.apache.cassandra.db.TypeSizes.sizeofVInt;
 
 @Unmetered
 public final class ColumnMetadata extends ColumnSpecification implements Selectable, Comparable<ColumnMetadata>
@@ -75,6 +76,8 @@ public final class ColumnMetadata extends ColumnSpecification implements Selecta
 
     public static final int NO_POSITION = -1;
     public static final int NO_UNIQUE_ID = Integer.MIN_VALUE;
+    public static final String EMPTY_COMMENT = "";
+    public static final String EMPTY_SECURITY_LABEL = "";
 
     public enum ClusteringOrder
     {
@@ -116,6 +119,9 @@ public final class ColumnMetadata extends ColumnSpecification implements Selecta
      */
     private final int position;
     public final int uniqueId;
+
+    public final String comment;
+    public final String securityLabel;
 
     private final Comparator<CellPath> cellPathComparator;
     private final Comparator<Object> asymmetricCellPathComparator;
@@ -250,6 +256,21 @@ public final class ColumnMetadata extends ColumnSpecification implements Selecta
                           @Nullable ColumnMask mask,
                           @Nonnull ColumnConstraints columnConstraints)
     {
+        this(ksName, cfName, name, type, uniqueId, position, kind, mask, columnConstraints, EMPTY_COMMENT, EMPTY_SECURITY_LABEL);
+    }
+
+    public ColumnMetadata(String ksName,
+                          String cfName,
+                          ColumnIdentifier name,
+                          AbstractType<?> type,
+                          int uniqueId,
+                          int position,
+                          Kind kind,
+                          @Nullable ColumnMask mask,
+                          @Nonnull ColumnConstraints columnConstraints,
+                          String comment,
+                          String securityLabel)
+    {
         super(ksName, cfName, name, type);
         this.uniqueId = uniqueId;
         assert name != null && type != null && kind != null;
@@ -270,6 +291,8 @@ public final class ColumnMetadata extends ColumnSpecification implements Selecta
         this.mask = mask;
         this.columnConstraints = columnConstraints;
         this.columnConstraints.setColumnName(name);
+        this.comment = comment;
+        this.securityLabel = securityLabel;
     }
 
     private static Comparator<CellPath> makeCellPathComparator(Kind kind, AbstractType<?> type)
@@ -301,22 +324,32 @@ public final class ColumnMetadata extends ColumnSpecification implements Selecta
 
     public ColumnMetadata copy()
     {
-        return new ColumnMetadata(ksName, cfName, name, type, uniqueId, position, kind, mask, columnConstraints);
+        return new ColumnMetadata(ksName, cfName, name, type, uniqueId, position, kind, mask, columnConstraints, comment, securityLabel);
     }
 
     public ColumnMetadata withNewName(ColumnIdentifier newName)
     {
-        return new ColumnMetadata(ksName, cfName, newName, type, uniqueId, position, kind, mask, columnConstraints);
+        return new ColumnMetadata(ksName, cfName, newName, type, uniqueId, position, kind, mask, columnConstraints, comment, securityLabel);
     }
 
     public ColumnMetadata withNewType(AbstractType<?> newType)
     {
-        return new ColumnMetadata(ksName, cfName, name, newType, uniqueId, position, kind, mask, columnConstraints);
+        return new ColumnMetadata(ksName, cfName, name, newType, uniqueId, position, kind, mask, columnConstraints, comment, securityLabel);
     }
 
     public ColumnMetadata withNewMask(@Nullable ColumnMask newMask)
     {
-        return new ColumnMetadata(ksName, cfName, name, type, uniqueId, position, kind, newMask, columnConstraints);
+        return new ColumnMetadata(ksName, cfName, name, type, uniqueId, position, kind, newMask, columnConstraints, comment, securityLabel);
+    }
+
+    public ColumnMetadata withNewComment(String newComment)
+    {
+        return new ColumnMetadata(ksName, cfName, name, type, uniqueId, position, kind, mask, columnConstraints, newComment, securityLabel);
+    }
+
+    public ColumnMetadata withNewSecurityLabel(String newSecurityLabel)
+    {
+        return new ColumnMetadata(ksName, cfName, name, type, uniqueId, position, kind, mask, columnConstraints, comment, newSecurityLabel);
     }
 
     public boolean isPartitionKey()
@@ -396,7 +429,13 @@ public final class ColumnMetadata extends ColumnSpecification implements Selecta
     public ColumnMetadata withNewColumnConstraints(ColumnConstraints constraints)
     {
         constraints.validate(this);
-        return new ColumnMetadata(ksName, cfName, name, type, uniqueId, position, kind, mask, constraints);
+        return new ColumnMetadata(ksName, cfName, name, type, uniqueId, position, kind, mask, constraints, comment, securityLabel);
+    }
+
+
+    public ColumnMetadata withSecurityLabel(String securityLabel)
+    {
+        return new ColumnMetadata(ksName, cfName, name, type, uniqueId, position, kind, mask, columnConstraints, comment, securityLabel);
     }
 
     public void removeColumnConstraints()
@@ -426,7 +465,9 @@ public final class ColumnMetadata extends ColumnSpecification implements Selecta
                && ksName.equals(other.ksName)
                && cfName.equals(other.cfName)
                && Objects.equals(mask, other.mask)
-               && Objects.equals(columnConstraints, other.columnConstraints);
+               && Objects.equals(columnConstraints, other.columnConstraints)
+               && comment.equals(other.comment)
+               && securityLabel.equals(other.securityLabel);
     }
 
     Optional<Difference> compare(ColumnMetadata other)
@@ -458,6 +499,8 @@ public final class ColumnMetadata extends ColumnSpecification implements Selecta
             result = 31 * result + position;
             result = 31 * result + (mask == null ? 0 : mask.hashCode());
             result = 31 * result + (columnConstraints == null ? 0 : columnConstraints.hashCode());
+            result = 31 * result + (comment == null ? 0 : comment.hashCode());
+            result = 31 * result + (securityLabel == null ? 0 : securityLabel.hashCode());
             hash = result;
         }
         return result;
@@ -476,6 +519,10 @@ public final class ColumnMetadata extends ColumnSpecification implements Selecta
                           .add("type", type)
                           .add("kind", kind)
                           .add("position", position)
+                          .add("mask", mask)
+                          .add("columnConstraints", columnConstraints)
+                          .add("comment", comment)
+                          .add("securityLabel", securityLabel)
                           .toString();
     }
 
@@ -737,7 +784,12 @@ public final class ColumnMetadata extends ColumnSpecification implements Selecta
                     ColumnConstraints.serializer.serialize(t.columnConstraints, out, version);
             }
             if (version.isAtLeast(Version.V7))
-                out.writeInt(t.uniqueId);
+                out.writeVInt32(t.uniqueId);
+            if (version.isAtLeast(Version.V8))
+            {
+                out.writeUTF(t.comment);
+                out.writeUTF(t.securityLabel);
+            }
         }
 
         public ColumnMetadata deserialize(DataInputPlus in, Types types, UserFunctions functions, Version version) throws IOException
@@ -763,8 +815,15 @@ public final class ColumnMetadata extends ColumnSpecification implements Selecta
                 constraints = ColumnConstraints.NO_OP;
             int uniqueId = NO_UNIQUE_ID;
             if (version.isAtLeast(Version.V7))
-                uniqueId = in.readInt();
-            return new ColumnMetadata(ksName, tableName, new ColumnIdentifier(nameBB, name), type, uniqueId, position, kind, mask, constraints);
+                uniqueId = in.readVInt32();
+            String comment = EMPTY_COMMENT;
+            String securityLabel = EMPTY_SECURITY_LABEL;
+            if (version.isAtLeast(Version.V8))
+            {
+                comment = in.readUTF();
+                securityLabel = in.readUTF();
+            }
+            return new ColumnMetadata(ksName, tableName, new ColumnIdentifier(nameBB, name), type, uniqueId, position, kind, mask, constraints, comment, securityLabel);
         }
 
         public long serializedSize(ColumnMetadata t, Version version)
@@ -775,6 +834,12 @@ public final class ColumnMetadata extends ColumnSpecification implements Selecta
                 constraintsSize += BOOL_SIZE;
                 if (t.hasConstraint())
                     constraintsSize += t.getColumnConstraints().serializer().serializedSize(t.columnConstraints, version);
+            }
+            long commentsAndSecurityLabelSize = 0;
+            if (version.isAtLeast(Version.V8))
+            {
+                commentsAndSecurityLabelSize += sizeof(t.comment);
+                commentsAndSecurityLabelSize += sizeof(t.securityLabel);
             }
             return sizeof(t.ksName) +
                    sizeof(t.cfName) +
@@ -787,7 +852,8 @@ public final class ColumnMetadata extends ColumnSpecification implements Selecta
                    BOOL_SIZE +
                    ((t.mask == null) ? 0 : ColumnMask.serializer.serializedSize(t.mask, version)) +
                    constraintsSize +
-                   (version.isAtLeast(Version.V7) ? 4 : 0);
+                   (version.isAtLeast(Version.V7) ? sizeofVInt(t.uniqueId) : 0) +
+                   commentsAndSecurityLabelSize;
         }
     }
 }

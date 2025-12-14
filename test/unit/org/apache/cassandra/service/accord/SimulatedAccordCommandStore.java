@@ -31,6 +31,7 @@ import java.util.function.Predicate;
 import java.util.function.ToLongFunction;
 import javax.annotation.Nullable;
 
+import accord.api.AsyncExecutor;
 import accord.api.Journal;
 import accord.api.LocalListeners;
 import accord.api.ProgressLog;
@@ -52,12 +53,13 @@ import accord.local.NodeCommandStoreService;
 import accord.local.PreLoadContext;
 import accord.local.SafeCommand;
 import accord.local.SafeCommandStore;
+import accord.local.SequentialAsyncExecutor;
 import accord.local.TimeService;
 import accord.local.durability.DurabilityService;
 import accord.messages.BeginRecovery;
 import accord.messages.PreAccept;
 import accord.messages.Reply;
-import accord.messages.TxnRequest;
+import accord.messages.RouteRequest;
 import accord.primitives.AbstractUnseekableKeys;
 import accord.primitives.Ballot;
 import accord.primitives.EpochSupplier;
@@ -75,7 +77,6 @@ import accord.topology.Topology;
 import accord.topology.TopologyManager;
 import accord.utils.Gens;
 import accord.utils.RandomSource;
-import accord.utils.async.AsyncChains;
 import accord.utils.async.AsyncResult;
 import org.apache.cassandra.concurrent.ExecutorFactory;
 import org.apache.cassandra.concurrent.ScheduledExecutorPlus;
@@ -87,7 +88,6 @@ import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.db.filter.ColumnFilter;
 import org.apache.cassandra.db.memtable.Memtable;
-import org.apache.cassandra.metrics.AccordCacheMetrics;
 import org.apache.cassandra.schema.TableId;
 import org.apache.cassandra.service.accord.api.TokenKey;
 import org.apache.cassandra.tcm.ClusterMetadata;
@@ -99,6 +99,7 @@ import org.assertj.core.api.Assertions;
 import static org.apache.cassandra.config.DatabaseDescriptor.getPartitioner;
 import static org.apache.cassandra.db.ColumnFamilyStore.FlushReason.UNIT_TESTS;
 import static org.apache.cassandra.schema.SchemaConstants.ACCORD_KEYSPACE_NAME;
+import static org.apache.cassandra.service.accord.AccordService.getBlocking;
 import static org.apache.cassandra.utils.AccordGenerators.fromQT;
 
 public class SimulatedAccordCommandStore implements AutoCloseable
@@ -158,14 +159,27 @@ public class SimulatedAccordCommandStore implements AutoCloseable
         this.topologies = new Topologies.Single(SizeOfIntersectionSorter.SUPPLIER, topology);
         Ranges ranges = topology.ranges();
         if (tableId != null)
-            ranges = ranges.slice(Ranges.of(TokenRange.create(TokenKey.min(tableId, getPartitioner()), TokenKey.max(tableId, getPartitioner()))));
+            ranges = ranges.overlapping(Ranges.of(TokenRange.create(TokenKey.min(tableId, getPartitioner()), TokenKey.max(tableId, getPartitioner()))));
         CommandStores.RangesForEpoch rangesForEpoch = new CommandStores.RangesForEpoch(topology.epoch(), ranges);
         updateHolder.add(topology.epoch(), rangesForEpoch, ranges);
 
         this.storeService = new NodeCommandStoreService()
         {
+            @Override
+            public AsyncExecutor someExecutor()
+            {
+                return null;
+            }
+
+            @Override
+            public SequentialAsyncExecutor someSequentialExecutor()
+            {
+                return null;
+            }
+
             private final ToLongFunction<TimeUnit> elapsed = TimeService.elapsedWrapperFromNonMonotonicSource(TimeUnit.NANOSECONDS, this::now);
             final Timeouts timeouts = new DefaultTimeouts(this);
+            long stamp;
 
             @Override public Timeouts timeouts() { return timeouts; }
 
@@ -215,6 +229,24 @@ public class SimulatedAccordCommandStore implements AutoCloseable
             {
                 throw new UnsupportedOperationException();
             }
+
+            @Override
+            public long currentStamp()
+            {
+                return stamp;
+            }
+
+            @Override
+            public void updateStamp()
+            {
+                ++stamp;
+            }
+
+            @Override
+            public boolean isReplaying()
+            {
+                return false;
+            }
         };
 
         TestAgent.RethrowAgent agent = new TestAgent.RethrowAgent()
@@ -226,10 +258,10 @@ public class SimulatedAccordCommandStore implements AutoCloseable
             }
 
             @Override
-            public void onUncaughtException(Throwable t)
+            public void onException(Throwable t)
             {
                 if (ignoreExceptions.test(t)) return;
-                super.onUncaughtException(t);
+                super.onException(t);
             }
         };
 
@@ -239,14 +271,14 @@ public class SimulatedAccordCommandStore implements AutoCloseable
                                                    agent,
                                                    null,
                                                    ignore -> new ProgressLog.NoOpProgressLog(),
-                                                   cs -> new DefaultLocalListeners(new RemoteListeners.NoOpRemoteListeners(), new DefaultLocalListeners.NotifySink()
+                                                   cs -> new DefaultLocalListeners(null, new RemoteListeners.NoOpRemoteListeners(), new DefaultLocalListeners.NotifySink()
                                                    {
                                                        @Override public void notify(SafeCommandStore safeStore, SafeCommand safeCommand, TxnId listener) {}
                                                        @Override public boolean notify(SafeCommandStore safeStore, SafeCommand safeCommand, LocalListeners.ComplexListener listener) { return false; }
                                                    }),
                                                    updateHolder,
                                                    journal,
-                                                   new AccordExecutorSimple(0, CommandStore.class.getSimpleName() + '[' + 0 + ']', new AccordCacheMetrics("test"), agent));
+                                                   new AccordExecutorSimple(0, CommandStore.class.getSimpleName() + '[' + 0 + ']', agent));
         this.commandStore.executor().executeDirectlyWithLock(() -> {
             commandStore.executor().setCapacity(8 << 20);
             commandStore.executor().setWorkingSetSize(4 << 20);
@@ -395,26 +427,26 @@ public class SimulatedAccordCommandStore implements AutoCloseable
         throw error;
     }
 
-    public <T extends Reply> T process(TxnRequest<T> request) throws ExecutionException, InterruptedException
+    public <T extends Reply> T process(RouteRequest<T> request) throws ExecutionException, InterruptedException
     {
-        return process(request, request::apply);
+        return process(request, request);
     }
 
     public <T extends Reply> T process(PreLoadContext loadCtx, Function<? super SafeCommandStore, T> function) throws ExecutionException, InterruptedException
     {
         var result = processAsync(loadCtx, function);
         processAll();
-        return AsyncChains.getBlocking(result);
+        return getBlocking(result);
     }
 
-    public <T extends Reply> AsyncResult<T> processAsync(TxnRequest<T> request)
+    public <T extends Reply> AsyncResult<T> processAsync(RouteRequest<T> request)
     {
-        return processAsync(request, request::apply);
+        return processAsync(request, request);
     }
 
     public <T extends Reply> AsyncResult<T> processAsync(PreLoadContext loadCtx, Function<? super SafeCommandStore, T> function)
     {
-        return commandStore.submit(loadCtx, function).beginAsResult();
+        return commandStore.submit(loadCtx, function);
     }
 
     public Pair<TxnId, AsyncResult<PreAccept.PreAcceptOk>> enqueuePreAccept(Txn txn, FullRoute<?> route)
@@ -432,13 +464,13 @@ public class SimulatedAccordCommandStore implements AutoCloseable
     {
         TxnId txnId = nextTxnId(txn.kind(), txn.keys().domain());
         Ballot ballot = Ballot.fromValues(storeService.epoch(), storeService.now(), nodeId);
-        BeginRecovery br = new BeginRecovery(nodeId, topologies, txnId, null, txn, route, ballot);
+        BeginRecovery br = new BeginRecovery(nodeId, topologies, txnId, null, 0, txn, route, ballot);
 
         return Pair.create(txnId, processAsync(br, safe -> {
             var reply = br.apply(safe);
             Assertions.assertThat(reply.kind() == BeginRecovery.RecoverReply.Kind.Ok).isTrue();
             return (BeginRecovery.RecoverOk) reply;
-        }).beginAsResult());
+        }));
     }
 
     public void processAll()

@@ -25,7 +25,7 @@ import java.util.Objects;
 import accord.local.Node;
 import com.google.common.collect.ImmutableMap;
 
-import com.google.common.collect.ImmutableSet;
+import accord.utils.SortedArrays.SortedArrayList;
 import org.apache.cassandra.db.TypeSizes;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.io.util.DataInputPlus;
@@ -235,21 +235,21 @@ public class AccordFastPath implements MetadataValue<AccordFastPath>
         return lastModified;
     }
 
-    public ImmutableSet<Node.Id> unavailableIds()
+    public SortedArrayList<Node.Id> unavailableIds()
     {
-        ImmutableSet.Builder<Node.Id> builder = ImmutableSet.builder();
-        info.entrySet().stream()
-                .filter(entry -> entry.getValue().status.isUnavailable())
-                .map(Map.Entry::getKey)
-                .forEach(builder::add);
-        return builder.build();
+        // TODO (expected): why don't we save this?
+        Node.Id[] ids = info.entrySet().stream()
+                            .filter(entry -> entry.getValue().status.isUnavailable())
+                            .map(Map.Entry::getKey)
+                            .toArray(Node.Id[]::new);
+        return SortedArrayList.ofUnsorted(ids);
     }
 
     public static final MetadataSerializer<AccordFastPath> serializer = new MetadataSerializer<AccordFastPath>()
     {
         private void serializeMap(Map<Node.Id, NodeInfo> map, DataOutputPlus out, Version version) throws IOException
         {
-            out.writeInt(map.size());
+            out.writeUnsignedVInt32(map.size());
             for (Map.Entry<Node.Id, NodeInfo> entry : map.entrySet())
             {
                 TopologySerializers.nodeId.serialize(entry.getKey(), out);
@@ -265,7 +265,7 @@ public class AccordFastPath implements MetadataValue<AccordFastPath>
 
         private ImmutableMap<Node.Id, NodeInfo> deserializeMap(DataInputPlus in, Version version) throws IOException
         {
-            int size = in.readInt();
+            int size = in.readUnsignedVInt32();
             if (size == 0)
                 return ImmutableMap.of();
 
@@ -284,7 +284,7 @@ public class AccordFastPath implements MetadataValue<AccordFastPath>
 
         private long serializedMapSize(Map<Node.Id, NodeInfo> map, Version version)
         {
-            long size = TypeSizes.INT_SIZE;
+            long size = TypeSizes.sizeofUnsignedVInt(map.size());
             for (Map.Entry<Node.Id, NodeInfo> entry : map.entrySet())
             {
                 size += TopologySerializers.nodeId.serializedSize(entry.getKey());

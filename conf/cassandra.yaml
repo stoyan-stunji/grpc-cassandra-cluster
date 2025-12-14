@@ -1990,6 +1990,10 @@ transparent_data_encryption_options:
 # SAFETY THRESHOLDS #
 #####################
 
+# Log the query if it reads more than
+# sstables_per_read_log_threshold SSTables
+sstables_per_read_log_threshold: 100
+
 # When executing a scan, within or across a partition, we need to keep the
 # tombstones seen in memory so we can return them to the coordinator, which
 # will use them to make sure other replicas also know about the deleted rows.
@@ -2048,6 +2052,11 @@ batch_size_fail_threshold: 50KiB
 # Log WARN on any batches not of type LOGGED than span across more partitions than this limit
 unlogged_batch_across_partitions_warn_threshold: 10
 
+# GCInspector configs:
+# For GC like ShenandoahGC/ZGC etc., there are GC events that do not have STW pauses (Concurrent phases)
+# Operator might find it reasonable to use lower thresholds for events require STW pauses and higher thresholds
+# for concurrent phases.
+#
 # GC Pauses greater than 200 ms will be logged at INFO level
 # This threshold can be adjusted to minimize logging if necessary
 # Min unit: ms
@@ -2058,6 +2067,17 @@ unlogged_batch_across_partitions_warn_threshold: 10
 # will deactivate the feature.
 # Min unit: ms
 # gc_warn_threshold: 1000ms
+
+# GC Concurrent phase greater than 1000 ms will be logged at INFO level
+# This threshold can be adjusted to minimize logging if necessary
+# Min unit: ms
+# gc_concurrent_phase_log_threshold: 1000ms
+
+# GC Concurrent phase than gc_concurrent_phase_warn_threshold will be logged at WARN level
+# Adjust the threshold based on your application throughput requirement. Setting to 0
+# will deactivate the feature.
+# Min unit: ms
+# gc_concurrent_phase_warn_threshold: 2000ms
 
 # Maximum size of any value in SSTables. Safety measure to detect SSTable corruption
 # early. Any value size larger than this threshold will result into marking an SSTable
@@ -2273,6 +2293,11 @@ drop_compact_storage_enabled: false
 # table_properties_ignored: []
 # table_properties_disallowed: []
 #
+# Guardrail to warn about, ignore or reject properties when creating or modifying keyspaces. By default all properties are allowed.
+# keyspace_properties_warned: []
+# keyspace_properties_ignored: []
+# keyspace_properties_disallowed: []
+
 # Guardrail to allow/disallow user-provided timestamps. Defaults to true.
 # user_timestamps_enabled: true
 #
@@ -2502,20 +2527,41 @@ drop_compact_storage_enabled: false
 # This would also apply to system keyspaces.
 # maximum_replication_factor_warn_threshold: -1
 # maximum_replication_factor_fail_threshold: -1
-#
+
+#role_name_policy:
+#  # Implementation class of a validator. When not in form of FQCN, the
+#  # package name org.apache.cassandra.db.guardrails is prepended.
+#  # By default, there is no validator.
+#  #validator_class_name: YourValidatorOfRoleNames
+#  # Implementation class of related generator which generates values which are valid when
+#  # tested against this validator. When not in form of FQCN, the
+#  # package name org.apache.cassandra.db.guardrails is prepended.
+#  # By default, there is no generator.
+#  # There is currently only one generator possible to configure - UUIDRoleNameGenerator
+#  generator_class_name: UUIDRoleNameGenerator
+#  # Minimum generated size of a name when name_size option is specified in CQL.
+#  # This can not be less than 10 and more than 32.
+#  #min_generated_name_size: 10
+
+# If this is set to false, then it is not possible to call reconfiguration
+# method in GuardrailsMBean. It will effectively forbid the reconfiguration of role_name_policy in runtime.
+# You would need to stop the node, change the configuration in cassandra.yaml and start the node again.
+# Defaults to true, which means that reconfiguration of role_name_policy via JMX is possible.
+#role_name_policy_reconfiguration_enabled: true
+
 # Guardrail to warn or fail when setting / altering a password.
 # Supported character sets are (both upper and lower-case): English, Cyrillic and modern Cyrillic, Czech, German, Polish.
 # Password is invalid if all characters are from non-supported character set. If a password is otherwise valid,
 # but it contains characters from unsupported language, these characters contribute only to password length rule.
 # All digits and all following special characters are supported too: !"#$%&()*+,-./:;<=>?@[\]^_`{|}~
-#password_validator:
+#password_policy:
 #  # Implementation class of a validator. When not in form of FQCN, the
-#  # package name org.apache.cassandra.db.guardrails.validators is prepended.
+#  # package name org.apache.cassandra.db.guardrails is prepended.
 #  # By default, there is no validator.
-#  class_name: CassandraPasswordValidator
+#  validator_class_name: CassandraPasswordValidator
 #  # Implementation class of related generator which generates values which are valid when
 #  # tested against this validator. When not in form of FQCN, the
-#  # package name org.apache.cassandra.db.guardrails.generators is prepended.
+#  # package name org.apache.cassandra.db.guardrails is prepended.
 #  # By default, there is no generator.
 #  generator_class_name: CassandraPasswordGenerator
 #  # There are four characteristics:
@@ -2566,7 +2612,15 @@ drop_compact_storage_enabled: false
 # method in GuardrailsMBean. It will effectively forbid the reconfiguration of password validator in runtime.
 # You would need to stop the node, change the configuration in cassandra.yaml and start the node again.
 # Defaults to true, which means that reconfiguration of password validator via JMX is possible.
-# password_validator_reconfiguration_enabled: true
+#password_policy_reconfiguration_enabled: true
+
+# Maximum allowed length for comments on schema elements (keyspaces, tables, columns, types, type fields).
+# Comments exceeding this length will be rejected. Defaults to 128 characters.
+max_comment_length: 128
+
+# Maximum allowed length for security labels on schema elements (tables, columns).
+# Security labels exceeding this length will be rejected. Defaults to 48 characters.
+max_security_label_length: 48
 
 # Guardrail to enable a CREATE or ALTER TABLE statement when default_time_to_live is set to 0
 # and the table is using TimeWindowCompactionStrategy compaction or a subclass of it.
@@ -2683,10 +2737,14 @@ storage_compatibility_mode: NONE
 # the given value.  Defaults to disabled.
 # reject_repair_compaction_threshold: 1024
 
-# At least 20% of disk must be unused to run incremental repair. It is useful to avoid disks filling up during
-# incremental repair as anti-compaction during incremental repair may contribute to additional space temporarily.
+# At least 20% of disk must be unused to run repair. It is useful to avoid disks filling up during
+# repair as anti-compaction during repair may contribute to additional space temporarily.
 # if you want to disable this feature (the recommendation is not to, but if you want to disable it for whatever reason)
 # then set the ratio to 0.0
+# repair_disk_headroom_reject_ratio: 0.2;
+
+# This is the deprecated config which was used to safeguard incremental repairs. Use repair_disk_headroom_reject_ratio
+# instead as it safeguards against all repairs.
 # incremental_repair_disk_headroom_reject_ratio: 0.2;
 
 # Configuration for Auto Repair Scheduler.
@@ -2778,6 +2836,9 @@ storage_compatibility_mode: NONE
 #   # The scheduler needs to adjust its order when nodes leave the ring. Deleted hosts are tracked in metadata
 #   # for a specified duration to ensure they are indeed removed before adjustments are made to the schedule.
 #   history_clear_delete_hosts_buffer_interval: 2h
+#   # By default repair is disabled if there are mixed major versions detected - which would happen
+#   # if a major version upgrade is being performed on the cluster, but a user can enable it using this flag
+#   mixed_major_version_repair_enabled: false
 #   # NOTE: Each of the below settings can be overridden per repair type under repair_type_overrides
 #   global_settings:
 #     # If true, attempts to group tables in the same keyspace into one repair; otherwise, each table is repaired
@@ -2837,3 +2898,49 @@ storage_compatibility_mode: NONE
 #         # especially in keyspaces with many tables. The splitter avoids batching tables together if they
 #         # exceed other configuration parameters like bytes_per_assignment or partitions_per_assignment.
 #         max_tables_per_assignment: 64
+
+# Dictionary compression settings for ZSTD dictionary-based compression
+# These settings control the automatic training and caching of compression dictionaries
+# for tables that use ZSTD dictionary compression.
+
+# How often to refresh compression dictionaries across the cluster.
+# During refresh, nodes will check for newer dictionary versions and update their caches.
+# Min unit: s
+compression_dictionary_refresh_interval: 3600s
+
+# Initial delay before starting the first dictionary refresh cycle after node startup.
+# This prevents all nodes from refreshing simultaneously when the cluster starts.
+# Min unit: s
+compression_dictionary_refresh_initial_delay: 10s
+
+# Maximum number of compression dictionaries to cache per table.
+# Each table using dictionary compression can have multiple dictionaries cached
+# (current version plus recently used versions for reading older SSTables).
+compression_dictionary_cache_size: 10
+
+# How long to keep compression dictionaries in the cache before they expire.
+# Expired dictionaries will be removed from memory but can be reloaded if needed.
+# Min unit: s
+compression_dictionary_cache_expire: 24h
+
+# Dictionary training configuration (advanced settings)
+# These settings control how compression dictionaries are trained from sample data.
+
+# Maximum size of a trained compression dictionary.
+# Larger dictionaries may provide better compression but use more memory.
+compression_dictionary_training_max_dictionary_size: 64KiB
+
+# Maximum total size of sample data to collect for dictionary training.
+# More sample data generally produces better dictionaries but takes longer to train.
+# The recommended sample size is 100x the dictionary size.
+compression_dictionary_training_max_total_sample_size: 10MiB
+
+# Enable automatic dictionary training based on sampling of write operations.
+# When enabled, the system will automatically collect samples and train new dictionaries.
+# Manual training via nodetool is always available regardless of this setting.
+compression_dictionary_training_auto_train_enabled: false
+
+# Sampling rate for automatic dictionary training (1-10000).
+# Value of 100 means 1% of writes are sampled. Lower values reduce overhead but may
+# result in less representative sample data for dictionary training.
+compression_dictionary_training_sampling_rate: 0.01

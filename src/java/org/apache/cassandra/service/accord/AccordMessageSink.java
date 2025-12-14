@@ -25,12 +25,10 @@ import java.util.Set;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableMap;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
+import accord.api.AsyncExecutor;
 import accord.api.MessageSink;
 import accord.impl.RequestCallbacks;
-import accord.local.AgentExecutor;
 import accord.local.Node;
 import accord.messages.Callback;
 import accord.messages.MessageType;
@@ -38,6 +36,7 @@ import accord.messages.Reply;
 import accord.messages.ReplyContext;
 import accord.messages.Request;
 import accord.primitives.TxnId;
+import accord.utils.async.Cancellable;
 import org.apache.cassandra.exceptions.RequestFailureReason;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.net.Message;
@@ -47,7 +46,6 @@ import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.net.ResponseContext;
 import org.apache.cassandra.net.Verb;
 import org.apache.cassandra.service.TimeoutStrategy;
-import org.apache.cassandra.service.accord.api.AccordAgent;
 import org.apache.cassandra.utils.Clock;
 
 import static accord.messages.MessageType.StandardMessage.*;
@@ -58,8 +56,6 @@ import static org.apache.cassandra.service.accord.api.AccordWaitStrategies.slowR
 
 public class AccordMessageSink implements MessageSink
 {
-    private static final Logger logger = LoggerFactory.getLogger(AccordMessageSink.class);
-
     public enum AccordMessageType implements MessageType
     {
         INTEROP_READ_REQ(Verb.ACCORD_INTEROP_READ_REQ),
@@ -149,22 +145,20 @@ public class AccordMessageSink implements MessageSink
         }
     }
 
-    private final AccordAgent agent;
     private final MessageDelivery messaging;
     private final AccordEndpointMapper endpointMapper;
     private final RequestCallbacks callbacks;
 
-    public AccordMessageSink(AccordAgent agent, MessageDelivery messaging, AccordEndpointMapper endpointMapper, RequestCallbacks callbacks)
+    public AccordMessageSink(MessageDelivery messaging, AccordEndpointMapper endpointMapper, RequestCallbacks callbacks)
     {
-        this.agent = agent;
         this.messaging = messaging;
         this.endpointMapper = endpointMapper;
         this.callbacks = callbacks;
     }
 
-    public AccordMessageSink(AccordAgent agent, AccordConfigurationService endpointMapper, RequestCallbacks callbacks)
+    public AccordMessageSink(AccordEndpointMapper endpointMapper, RequestCallbacks callbacks)
     {
-        this(agent, MessagingService.instance(), endpointMapper, callbacks);
+        this(MessagingService.instance(), endpointMapper, callbacks);
     }
 
     @Override
@@ -173,14 +167,16 @@ public class AccordMessageSink implements MessageSink
         Verb verb = VerbMapping.getVerb(request);
         Preconditions.checkNotNull(verb, "Verb is null for type %s", request.type());
         Message<Request> message = Message.out(verb, request);
-        InetAddressAndPort endpoint = endpointMapper.mappedEndpoint(to);
-        logger.trace("Sending {} {} to {}", verb, message.payload, endpoint);
+        InetAddressAndPort endpoint = endpointMapper.mappedEndpointOrNull(to, message);
+        if (endpoint == null)
+            return;
+
         messaging.send(message, endpoint);
     }
 
     // TODO (expected): permit bulk send to save esp. on callback registration (and combine records)
     @Override
-    public void send(Node.Id to, Request request, int attempt, AgentExecutor executor, Callback callback)
+    public Cancellable send(Node.Id to, Request request, int attempt, AsyncExecutor executor, Callback callback)
     {
         Verb verb = VerbMapping.getVerb(request);
         Preconditions.checkNotNull(verb, "Verb is null for type %s", request.type());
@@ -212,33 +208,43 @@ public class AccordMessageSink implements MessageSink
         }
 
         Message<Request> message = Message.out(verb, request, expiresAtNanos);
-        InetAddressAndPort endpoint = endpointMapper.mappedEndpoint(to);
-        logger.trace("Sending {} {} to {}", verb, message.payload, endpoint);
-        callbacks.registerAt(message.id(), executor, callback, to, nowNanos, slowAtNanos, expiresAtNanos, NANOSECONDS);
+        InetAddressAndPort endpoint = endpointMapper.mappedEndpointOrNull(to, message);
+        if (endpoint == null)
+        {
+            executor.execute(() -> callback.onFailure(to, null));
+            return null;
+        }
+
+        Cancellable cancellable = callbacks.registerAt(message.id(), executor, callback, to, nowNanos, slowAtNanos, expiresAtNanos, NANOSECONDS);
+        messaging.send(message, endpoint);
+        return cancellable;
+    }
+
+    @Override
+    public void reply(Node.Id replyingTo, ReplyContext replyContext, Reply reply)
+    {
+        ResponseContext respondTo = (ResponseContext) replyContext;
+        Message<?> message = Message.responseWith(reply, respondTo);
+        if (!reply.isFinal())
+            message = message.withFlag(MessageFlag.NOT_FINAL);
+        checkReplyType(reply, respondTo);
+        InetAddressAndPort endpoint = endpointMapper.mappedEndpointOrNull(replyingTo, message);
+        if (endpoint == null)
+            return;
+
         messaging.send(message, endpoint);
     }
 
     @Override
-    public void reply(Node.Id replyingToNode, ReplyContext replyContext, Reply reply)
+    public void replyWithUnknownFailure(Node.Id replyingTo, ReplyContext replyContext, Throwable failure)
     {
         ResponseContext respondTo = (ResponseContext) replyContext;
-        Message<?> responseMsg = Message.responseWith(reply, respondTo);
-        if (!reply.isFinal())
-            responseMsg = responseMsg.withFlag(MessageFlag.NOT_FINAL);
-        checkReplyType(reply, respondTo);
-        InetAddressAndPort endpoint = endpointMapper.mappedEndpoint(replyingToNode);
-        logger.trace("Replying {} {} to {}", responseMsg.verb(), responseMsg.payload, endpoint);
-        messaging.send(responseMsg, endpoint);
-    }
+        Message<?> message = Message.failureResponse(RequestFailureReason.UNKNOWN, failure, respondTo);
+        InetAddressAndPort endpoint = endpointMapper.mappedEndpointOrNull(replyingTo, message);
+        if (endpoint == null)
+            return;
 
-    @Override
-    public void replyWithUnknownFailure(Node.Id replyingToNode, ReplyContext replyContext, Throwable failure)
-    {
-        ResponseContext respondTo = (ResponseContext) replyContext;
-        Message<?> responseMsg = Message.failureResponse(RequestFailureReason.UNKNOWN, failure, respondTo);
-        InetAddressAndPort endpoint = endpointMapper.mappedEndpoint(replyingToNode);
-        logger.trace("Replying with failure {} {} to {}", responseMsg.verb(), responseMsg.payload, endpoint);
-        messaging.send(responseMsg, endpoint);
+        messaging.send(message, endpoint);
     }
 
     private static void checkReplyType(Reply reply, ResponseContext respondTo)

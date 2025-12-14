@@ -46,6 +46,8 @@ import org.apache.cassandra.transport.Dispatcher;
 import org.apache.cassandra.transport.Event.SchemaChange;
 import org.apache.cassandra.transport.messages.ResultMessage;
 
+import static org.apache.cassandra.schema.KeyspaceMetadata.validateKeyspaceName;
+
 abstract public class AlterSchemaStatement implements CQLStatement.SingleKeyspaceCqlStatement, SchemaTransformation
 {
     private static final Logger logger = LoggerFactory.getLogger(AlterSchemaStatement.class);
@@ -168,7 +170,8 @@ abstract public class AlterSchemaStatement implements CQLStatement.SingleKeyspac
         if (null != keyspace && keyspace.isVirtual())
             throw ire("Virtual keyspace '%s' is not user-modifiable", keyspaceName);
 
-        validateKeyspaceName();
+        validateKeyspaceName(keyspaceName, AlterSchemaStatement::ire);
+
         setExecutionTimestamp(state.getTimestamp());
         // Perform a 'dry-run' attempt to apply the transformation locally before submitting to the CMS. This can save a
         // round trip to the CMS for things syntax errors, but also fail fast for things like configuration errors.
@@ -180,12 +183,20 @@ abstract public class AlterSchemaStatement implements CQLStatement.SingleKeyspac
         // submission to the CMS, but it can't guarantee that the statement can be applied as-is on every node in the
         // cluster, as config can be heterogenous falling back to safe defaults may occur on some nodes.
         ClusterMetadata metadata = ClusterMetadata.current();
-        apply(metadata);
+        Keyspaces proposed = apply(metadata);
+        KeyspacesDiff localDiff =  Keyspaces.diff(metadata.schema.getKeyspaces(), proposed);
+        if (localDiff.isEmpty())
+            return new ResultMessage.Void();
+
         ClusterMetadata result = commit(metadata);
 
         KeyspacesDiff diff = Keyspaces.diff(metadata.schema.getKeyspaces(), result.schema.getKeyspaces());
         clientWarnings(diff).forEach(ClientWarn.instance::warn);
 
+        // Even though the preliminary local application produced a non-empty diff, there may have been concurrent
+        // schema transformations that had been committed to the log but not yet enacted locally. So there remains a
+        // possibility that the ultimate result is a no-op. i.e. two identical "CREATE IF NOT EXISTS..." racing from
+        // different coordinators.
         if (diff.isEmpty())
             return new ResultMessage.Void();
 
@@ -209,16 +220,6 @@ abstract public class AlterSchemaStatement implements CQLStatement.SingleKeyspac
     protected ClusterMetadata commit(ClusterMetadata metadata)
     {
         return Schema.instance.submit(this);
-    }
-
-    private void validateKeyspaceName()
-    {
-        if (!SchemaConstants.isValidName(keyspaceName))
-        {
-            throw ire("Keyspace name must not be empty, more than %d characters long, " +
-                      "or contain non-alphanumeric-underscore characters (got '%s')",
-                      SchemaConstants.NAME_LENGTH, keyspaceName);
-        }
     }
 
     protected void validateDefaultTimeToLive(TableParams params)

@@ -286,6 +286,7 @@ JUNK ::= /([ \t\r\f\v]+|(--|[/][/])[^\n\r]*([\n\r]|$)|[/][*].*?[*][/])/ ;
                           | <createFunctionStatement>
                           | <createAggregateStatement>
                           | <createTriggerStatement>
+                          | <addIdentityStatement>
                           | <dropKeyspaceStatement>
                           | <dropColumnFamilyStatement>
                           | <dropIndexStatement>
@@ -294,15 +295,25 @@ JUNK ::= /([ \t\r\f\v]+|(--|[/][/])[^\n\r]*([\n\r]|$)|[/][*].*?[*][/])/ ;
                           | <dropFunctionStatement>
                           | <dropAggregateStatement>
                           | <dropTriggerStatement>
+                          | <dropIdentityStatement>
                           | <alterTableStatement>
                           | <alterKeyspaceStatement>
                           | <alterUserTypeStatement>
+                          | <commentOnKeyspaceStatement>
+                          | <commentOnTableStatement>
+                          | <commentOnColumnStatement>
+                          | <commentOnTypeStatement>
+                          | <securityLabelOnKeyspaceStatement>
+                          | <securityLabelOnTableStatement>
+                          | <securityLabelOnColumnStatement>
+                          | <securityLabelOnTypeStatement>
                           ;
 
 <authenticationStatement> ::= <createUserStatement>
                             | <alterUserStatement>
                             | <dropUserStatement>
                             | <listUsersStatement>
+                            | <createGeneratedRoleStatement>
                             | <createRoleStatement>
                             | <alterRoleStatement>
                             | <dropRoleStatement>
@@ -399,6 +410,8 @@ JUNK ::= /([ \t\r\f\v]+|(--|[/][/])[^\n\r]*([\n\r]|$)|[/][*].*?[*][/])/ ;
                     ;
 <propertyOrOption> ::= <property>
                      | "INDEXES"
+                     | "COMMENTS"
+                     | "SECURITY" "LABELS"
                      ;
 
 '''
@@ -759,6 +772,7 @@ syntax_rules += r'''
                           ( "PER" "PARTITION" "LIMIT" perPartitionLimit=<wholenumber> )?
                           ( "LIMIT" limit=<wholenumber> )?
                           ( "ALLOW" "FILTERING" )?
+                          ( "WITH" <options> )?
                     ;
 <whereClause> ::= <relation> ( "AND" <relation> )*
                 ;
@@ -803,6 +817,14 @@ syntax_rules += r'''
 <groupByFunctionArgument> ::= [groupcol]=<cident>
                             | <term>
                             ;
+
+<identifiers> ::= "{" <identifier> ( "," <identifier> )* "}"
+                  ;
+<options> ::= <option> ( "AND" <option> )*
+                  ;
+<option> ::= "included_indexes" "=" <identifiers>
+           | "excluded_indexes" "=" <identifiers>
+           ;
 
 <aggregateMathFunctions> ::= "COUNT" "(" star=( "*" | "1" ) ")"
              | "AVG" "(" [colname]=<cident> ")"
@@ -1582,6 +1604,32 @@ syntax_rules += r'''
 '''
 
 syntax_rules += r'''
+<commentOnKeyspaceStatement> ::= "COMMENT" "ON" "KEYSPACE" ks=<keyspaceName> "IS" comment=( <stringLiteral> | "NULL" )
+                               ;
+
+<commentOnTableStatement> ::= "COMMENT" "ON" wat=( "COLUMNFAMILY" | "TABLE" ) cf=<columnFamilyName> "IS" comment=( <stringLiteral> | "NULL" )
+                            ;
+
+<commentOnColumnStatement> ::= "COMMENT" "ON" "COLUMN" cf=<columnFamilyName> dot="." col=<cident> "IS" comment=( <stringLiteral> | "NULL" )
+                             ;
+
+<commentOnTypeStatement> ::= "COMMENT" "ON" "TYPE" ut=<userTypeName> "IS" comment=( <stringLiteral> | "NULL" )
+                           ;
+
+<securityLabelOnKeyspaceStatement> ::= "SECURITY" "LABEL" "ON" "KEYSPACE" ks=<keyspaceName> "IS" label=( <stringLiteral> | "NULL" )
+                                     ;
+
+<securityLabelOnTableStatement> ::= "SECURITY" "LABEL" "ON" wat=( "COLUMNFAMILY" | "TABLE" ) cf=<columnFamilyName> "IS" label=( <stringLiteral> | "NULL" )
+                                  ;
+
+<securityLabelOnColumnStatement> ::= "SECURITY" "LABEL" "ON" "COLUMN" cf=<columnFamilyName> dot="." col=<cident> "IS" label=( <stringLiteral> | "NULL" )
+                                   ;
+
+<securityLabelOnTypeStatement> ::= "SECURITY" "LABEL" "ON" "TYPE" ut=<userTypeName> "IS" label=( <stringLiteral> | "NULL" )
+                                 ;
+'''
+
+syntax_rules += r'''
 <username> ::= name=( <identifier> | <stringLiteral> )
              ;
 
@@ -1607,6 +1655,10 @@ syntax_rules += r'''
              | <quotedName>
              | <unreservedKeyword> )
              ;
+
+<createGeneratedRoleStatement> ::= "CREATE" "GENERATED" "ROLE"
+                                       ( "WITH" <roleProperty> ("AND" <roleProperty>)*)?
+                                 ;
 
 <createRoleStatement> ::= "CREATE" "ROLE" ("IF" "NOT" "EXISTS")? <rolename>
                               ( "WITH" <roleProperty> ("AND" <roleProperty>)*)?
@@ -1740,6 +1792,7 @@ syntax_rules += r'''
                              "ON" cf=<columnFamilyName>
                          ;
 '''
+
 explain_completion('createTriggerStatement', 'class', '\'fully qualified class name\'')
 
 
@@ -1755,6 +1808,13 @@ def drop_trigger_completer(ctxt, cass):
     names = get_trigger_names(ctxt, cass)
     return list(map(maybe_escape_name, names))
 
+
+syntax_rules += r'''
+<addIdentityStatement> ::= "ADD" "IDENTITY" ("IF" "NOT" "EXISTS")? <stringLiteral> "TO" "ROLE" <rolename>
+                         ;
+<dropIdentityStatement> ::= "DROP" "IDENTITY" ("IF" "EXISTS")? <stringLiteral>
+                          ;
+'''
 
 # END SYNTAX/COMPLETION RULE DEFINITIONS
 

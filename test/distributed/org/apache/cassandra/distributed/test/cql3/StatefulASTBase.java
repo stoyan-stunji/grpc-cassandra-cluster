@@ -19,9 +19,7 @@
 package org.apache.cassandra.distributed.test.cql3;
 
 import java.io.IOException;
-import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.EnumSet;
 import java.util.List;
@@ -29,27 +27,21 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import javax.annotation.Nullable;
 
-import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.Maps;
+import org.assertj.core.api.ThrowableAssert;
 import org.slf4j.Logger;
 
 import accord.utils.Gen;
 import accord.utils.Gens;
 import accord.utils.Property;
 import accord.utils.RandomSource;
-import com.datastax.driver.core.ColumnDefinitions;
-import com.datastax.driver.core.ResultSet;
-import com.datastax.driver.core.Row;
 import com.datastax.driver.core.Session;
-import com.datastax.driver.core.SimpleStatement;
 import com.datastax.driver.core.SocketOptions;
-import com.datastax.driver.core.exceptions.ReadFailureException;
-import com.datastax.driver.core.exceptions.WriteFailureException;
 import org.apache.cassandra.config.CassandraRelevantProperties;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.KnownIssue;
@@ -63,12 +55,15 @@ import org.apache.cassandra.cql3.ast.Select;
 import org.apache.cassandra.cql3.ast.StandardVisitors;
 import org.apache.cassandra.cql3.ast.Statement;
 import org.apache.cassandra.cql3.ast.TableReference;
+import org.apache.cassandra.cql3.ast.Txn;
 import org.apache.cassandra.cql3.ast.Value;
 import org.apache.cassandra.cql3.ast.Visitor;
 import org.apache.cassandra.cql3.ast.Visitor.CompositeVisitor;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.AsciiType;
 import org.apache.cassandra.db.marshal.BytesType;
+import org.apache.cassandra.db.marshal.ListType;
+import org.apache.cassandra.db.marshal.LongType;
 import org.apache.cassandra.db.marshal.UTF8Type;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.distributed.Cluster;
@@ -79,7 +74,7 @@ import org.apache.cassandra.distributed.api.IInstanceConfig;
 import org.apache.cassandra.distributed.api.IInvokableInstance;
 import org.apache.cassandra.distributed.test.JavaDriverUtils;
 import org.apache.cassandra.distributed.test.TestBaseImpl;
-import org.apache.cassandra.exceptions.RequestFailureReason;
+import org.apache.cassandra.distributed.util.DriverUtils;
 import org.apache.cassandra.harry.model.ASTSingleTableModel;
 import org.apache.cassandra.harry.util.StringUtils;
 import org.apache.cassandra.repair.RepairGenerators;
@@ -90,10 +85,11 @@ import org.apache.cassandra.utils.AbstractTypeGenerators;
 import org.apache.cassandra.utils.CassandraGenerators;
 import org.apache.cassandra.utils.FastByteOperations;
 import org.apache.cassandra.utils.Generators;
+import org.assertj.core.api.Assertions;
 import org.quicktheories.generators.SourceDSL;
 
+import static accord.utils.Property.ignoreCommand;
 import static accord.utils.Property.multistep;
-import static org.apache.cassandra.distributed.test.JavaDriverUtils.toDriverCL;
 import static org.apache.cassandra.utils.AbstractTypeGenerators.overridePrimitiveTypeSupport;
 import static org.apache.cassandra.utils.AbstractTypeGenerators.stringComparator;
 
@@ -111,6 +107,11 @@ public class StatefulASTBase extends TestBaseImpl
      */
     protected static boolean CQL_DEBUG_APPLY_OPERATOR = false;
 
+    /**
+     * Allows for overriding the CQL format logic, default is none (single line), but can create custom ones to help with the history
+     */
+    protected static Supplier<CQLFormatter> CQL_FORMATTER = () -> CQLFormatter.None.instance;
+
     protected static final Gen<Gen<Boolean>> BOOL_DISTRIBUTION = Gens.bools().mixedDistribution();
     protected static final Gen<Gen<Conditional.Where.Inequality>> LESS_THAN_DISTRO = Gens.mixedDistribution(Stream.of(Conditional.Where.Inequality.values())
                                                                                                                   .filter(i -> i == Conditional.Where.Inequality.LESS_THAN || i == Conditional.Where.Inequality.LESS_THAN_EQ)
@@ -125,6 +126,7 @@ public class StatefulASTBase extends TestBaseImpl
     protected static final Gen<Gen.IntGen> LIMIT_DISTRO = Gens.mixedDistribution(1, 1001);
     protected static final Gen<Gen.IntGen> REPAIR_TYPE_EMPTY_MODEL_DISTRO = Gens.mixedDistribution(0, 2);
     protected static final Gen<Gen.IntGen> REPAIR_TYPE_DISTRO = Gens.mixedDistribution(0, 3);
+    private static final ListType<Long> LONG_LIST_TYPE = ListType.getInstance(LongType.instance, false);
 
     static
     {
@@ -201,15 +203,60 @@ public class StatefulASTBase extends TestBaseImpl
     protected static <S extends BaseState> Property.Command<S, Void, ?> compactTable(RandomSource rs, S state)
     {
         return new Property.SimpleCommand<>("nodetool compact " + state.metadata.keyspace + ' ' + state.metadata.name, s2 -> {
-            state.cluster.forEach(i -> i.nodetoolResult("compact", s2.metadata.keyspace, s2.metadata.name).asserts().success());
+            s2.cluster.forEach(i -> i.nodetoolResult("compact", s2.metadata.keyspace, s2.metadata.name).asserts().success());
             s2.compact();
+        });
+    }
+
+    protected static <S extends CommonState> Property.Command<S, Void, ?> validateUsingTimestamp(RandomSource rs, S state)
+    {
+        if (state.operations == 0)
+            return ignoreCommand();
+        var builder = Select.builder(state.metadata);
+        for (var c : state.model.factory.regularAndStaticColumns)
+            builder.selection(FunctionCall.writetime(c));
+        ByteBuffer upperboundTimestamp = LongType.instance.decompose((long) state.operations);
+        var select = builder.build();
+        var inst = state.selectInstance(rs);
+        return new Property.SimpleCommand<>(state.humanReadable(select, null), s -> {
+            var result = s.executeQuery(inst, Integer.MAX_VALUE, s.selectCl(), select);
+            for (var row : result)
+            {
+                for (var col : state.model.factory.regularAndStaticColumns)
+                {
+                    int idx = state.model.factory.regularAndStaticColumns.indexOf(col);
+                    ByteBuffer value = row[idx];
+                    if (value == null) continue;
+                    if (col.type().isMultiCell())
+                    {
+                        List<ByteBuffer> timestamps = LONG_LIST_TYPE.unpack(value);
+                        int cellIndex = 0;
+                        for (var timestamp : timestamps)
+                        {
+                            Assertions.assertThat(LongType.instance.compare(timestamp, upperboundTimestamp))
+                                      .describedAs("Unexected timestamp at multi-cell index %s for col %s: %s > %s", cellIndex, col, LongType.instance.compose(timestamp), state.operations)
+                                      .isLessThanOrEqualTo(state.operations);
+                            cellIndex++;
+                        }
+                    }
+                    else
+                    {
+                        Assertions.assertThat(LongType.instance.compare(value, upperboundTimestamp))
+                                  .describedAs("Unexected timestamp for col %s: %s > %s", col, LongType.instance.compose(value), state.operations)
+                                  .isLessThanOrEqualTo(state.operations);
+                    }
+                }
+            }
         });
     }
 
     protected static <S extends CommonState> Property.Command<S, Void, ?> insert(RandomSource rs, S state)
     {
         int timestamp = ++state.operations;
-        Mutation mutation = state.mutationGen().next(rs).withTimestamp(timestamp);
+        Mutation original = state.mutationGen().next(rs);
+        Mutation mutation = state.allowUsingTimestamp()
+                            ? original.withTimestamp(timestamp)
+                            : original;
 
         if (!state.readAfterWrite())
             return state.command(rs, mutation);
@@ -435,9 +482,20 @@ public class StatefulASTBase extends TestBaseImpl
             return command(rs, select, null);
         }
 
+        protected boolean allowListElementAccessForUpdateSet()
+        {
+            // this requires a read at the same CL, but the model is global level and not per-node level, so can't handle
+            return mutationCl() != ConsistencyLevel.NODE_LOCAL;
+        }
+
         protected boolean allowRepair()
         {
             return false;
+        }
+
+        protected boolean allowUsingTimestamp()
+        {
+            return true;
         }
 
         protected RepairGenerators.Builder repairArgsBuilder()
@@ -541,19 +599,59 @@ public class StatefulASTBase extends TestBaseImpl
         {
             var inst = selectInstance(rs);
             String postfix = "on " + inst;
-            if (mutation.isCas())
-            {
+            @Nullable
+            Consumer<ThrowableAssert.ThrowingCallable> shouldRaiseThrowable = model.shouldReject(mutation);
+            if (shouldRaiseThrowable != null)
+                postfix += ", should reject";
+            else if (mutation.isCas())
                 postfix += ", would apply " + model.shouldApply(mutation);
-                // CAS doesn't allow timestamps
-                mutation = mutation.withoutTimestamp();
-            }
+
             if (annotate == null) annotate = postfix;
             else                  annotate += ", " + postfix;
-            Mutation finalMutation = mutation;
             return new Property.SimpleCommand<>(humanReadable(mutation, annotate), s -> {
-                var result = s.executeQuery(inst, Integer.MAX_VALUE, s.mutationCl(), finalMutation);
-                s.model.updateAndValidate(result, finalMutation);
+                if (shouldRaiseThrowable != null)
+                {
+                    shouldRaiseThrowable.accept(() -> s.executeQuery(inst, Integer.MAX_VALUE, s.mutationCl(), mutation));
+                    s.mutation();
+                    return;
+                }
+                var result = s.executeQuery(inst, Integer.MAX_VALUE, s.mutationCl(), mutation);
+                s.model.updateAndValidate(result, mutation);
                 s.mutation();
+            });
+        }
+
+        protected <S extends BaseState> Property.Command<S, Void, ?> command(RandomSource rs, Txn txn)
+        {
+            return command(rs, txn, null);
+        }
+
+        protected <S extends BaseState> Property.Command<S, Void, ?> command(RandomSource rs, Txn txn, @Nullable String annotate)
+        {
+            var inst = selectInstance(rs);
+            String postfix = "on " + inst;
+            @Nullable
+            Consumer<ThrowableAssert.ThrowingCallable> shouldRaiseThrowable = model.shouldReject(txn);
+            if (shouldRaiseThrowable != null)
+                postfix += ", should reject";
+            else if (model.isConditional(txn))
+                postfix += ", would apply " + model.shouldApply(txn);
+            if (annotate == null) annotate = postfix;
+            else annotate += ", " + postfix;
+
+            return new Property.SimpleCommand<>(humanReadable(txn, annotate), s -> {
+                boolean hasMutation = txn.ifBlock.isPresent() || !txn.mutations.isEmpty();
+                ConsistencyLevel cl = hasMutation ? s.mutationCl() : s.selectCl();
+                if (shouldRaiseThrowable != null)
+                {
+                    shouldRaiseThrowable.accept(() -> s.executeQuery(inst, Integer.MAX_VALUE, cl, txn));
+                }
+                else
+                {
+                    s.model.updateAndValidate(s.executeQuery(inst, Integer.MAX_VALUE, cl, txn), txn);
+                }
+                if (hasMutation)
+                    s.mutation();
             });
         }
 
@@ -631,89 +729,14 @@ public class StatefulASTBase extends TestBaseImpl
                 instance.executeInternal(stmt.toCQL(), (Object[]) stmt.bindsEncoded());
                 return new ByteBuffer[0][];
             }
-            else
-            {
-                SimpleStatement ss = new SimpleStatement(stmt.toCQL(), (Object[]) stmt.bindsEncoded());
-                if (fetchSize != Integer.MAX_VALUE)
-                    ss.setFetchSize(fetchSize);
-                if (stmt.kind() == Statement.Kind.MUTATION)
-                {
-                    switch (cl)
-                    {
-                        case SERIAL:
-                            ss.setSerialConsistencyLevel(toDriverCL(cl));
-                            ss.setConsistencyLevel(com.datastax.driver.core.ConsistencyLevel.QUORUM);
-                            break;
-                        case LOCAL_SERIAL:
-                            ss.setSerialConsistencyLevel(toDriverCL(cl));
-                            ss.setConsistencyLevel(com.datastax.driver.core.ConsistencyLevel.LOCAL_QUORUM);
-                            break;
-                        default:
-                            ss.setConsistencyLevel(toDriverCL(cl));
-                    }
-                }
-                else
-                {
-                    ss.setConsistencyLevel(toDriverCL(cl));
-                }
-
-                InetSocketAddress broadcastAddress = instance.config().broadcastAddress();
-                var host = client.getMetadata().getAllHosts().stream()
-                                 .filter(h -> h.getBroadcastSocketAddress().getAddress().equals(broadcastAddress.getAddress()))
-                                 .filter(h -> h.getBroadcastSocketAddress().getPort() == broadcastAddress.getPort())
-                                 .findAny()
-                                 .get();
-                ss.setHost(host);
-                ResultSet result;
-                try
-                {
-                    result = session.execute(ss);
-                }
-                catch (ReadFailureException t)
-                {
-                    throw new AssertionError("failed from=" + Maps.transformValues(t.getFailuresMap(), BaseState::safeErrorCode), t);
-                }
-                catch (WriteFailureException t)
-                {
-                    throw new AssertionError("failed from=" + Maps.transformValues(t.getFailuresMap(), BaseState::safeErrorCode), t);
-                }
-                return getRowsAsByteBuffer(result);
-            }
+            return DriverUtils.executeQuery(session, instance, fetchSize, cl, stmt);
         }
 
-        private static String safeErrorCode(Integer code)
-        {
-            try
-            {
-                return RequestFailureReason.fromCode(code).name();
-            }
-            catch (IllegalArgumentException e)
-            {
-                return "Unexpected code " + code + ": " + e.getMessage();
-            }
-        }
-
-        @VisibleForTesting
-        static ByteBuffer[][] getRowsAsByteBuffer(ResultSet result)
-        {
-            ColumnDefinitions columns = result.getColumnDefinitions();
-            List<ByteBuffer[]> ret = new ArrayList<>();
-            for (Row rowVal : result)
-            {
-                ByteBuffer[] row = new ByteBuffer[columns.size()];
-                for (int i = 0; i < columns.size(); i++)
-                    row[i] = rowVal.getBytesUnsafe(i);
-                ret.add(row);
-            }
-            ByteBuffer[][] a = new ByteBuffer[ret.size()][];
-            return ret.toArray(a);
-        }
-
-        private String humanReadable(Statement stmt, @Nullable String annotate)
+        protected String humanReadable(Statement stmt, @Nullable String annotate)
         {
             // With UTF-8 some chars can cause printing issues leading to error messages that don't reproduce the original issue.
             // To avoid this problem, always escape the CQL so nothing gets lost
-            String cql = StringUtils.escapeControlChars(stmt.visit(debug).toCQL(CQLFormatter.None.instance));
+            String cql = StringUtils.escapeControlChars(stmt.visit(debug).toCQL(CQL_FORMATTER.get()));
             if (annotate != null)
                 cql += " -- " + annotate;
             return cql;

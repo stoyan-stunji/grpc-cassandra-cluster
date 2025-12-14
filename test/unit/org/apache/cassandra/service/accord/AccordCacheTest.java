@@ -17,20 +17,17 @@
  */
 package org.apache.cassandra.service.accord;
 
-import java.util.UUID;
 import java.util.function.Function;
 
 import org.junit.Assert;
-import org.junit.Before;
 import org.junit.Test;
 
-import accord.utils.async.Cancellable;
+import org.agrona.concurrent.NoOpLock;
 import org.apache.cassandra.cache.CacheSize;
 import org.apache.cassandra.concurrent.ExecutorPlus;
 import org.apache.cassandra.concurrent.ManualExecutor;
 import org.apache.cassandra.metrics.AccordCacheMetrics;
-import org.apache.cassandra.metrics.CacheAccessMetrics;
-import org.apache.cassandra.service.accord.AccordCacheEntry.OnSaved;
+import org.apache.cassandra.service.accord.AccordCacheEntry.SaveExecutor;
 import org.apache.cassandra.service.accord.AccordCacheEntry.Status;
 
 import static org.apache.cassandra.service.accord.AccordTestUtils.testLoad;
@@ -42,7 +39,6 @@ import static org.mockito.Mockito.when;
 public class AccordCacheTest
 {
     private static final long DEFAULT_NODE_SIZE = nodeSize(0);
-    private AccordCacheMetrics cacheMetrics;
 
     private static abstract class TestSafeState<T> implements AccordSafeState<T, T>
     {
@@ -91,12 +87,6 @@ public class AccordCacheTest
         }
 
         @Override
-        public Cancellable saving()
-        {
-            return global.saving();
-        }
-
-        @Override
         public Throwable failure()
         {
             return global.failure();
@@ -141,6 +131,12 @@ public class AccordCacheTest
         return itemSize + emptyNodeSize();
     }
 
+    private static int nextMetricId;
+    private static String nextMetricId()
+    {
+        return Integer.toString(++nextMetricId);
+    }
+
     private static void assertCacheState(AccordCache cache, int referenced, int total, long bytes)
     {
         Assert.assertEquals(referenced, cache.numReferencedEntries());
@@ -148,39 +144,31 @@ public class AccordCacheTest
         Assert.assertEquals(bytes, cache.weightedSize());
     }
 
-    private void assertCacheMetrics(CacheAccessMetrics metrics, int hits, int misses, int requests, int sizes)
+    private void assertCacheMetrics(AccordCacheMetrics metrics, int hits, int misses, int requests, int sizes)
     {
-        Assert.assertEquals(hits, metrics.hits.getCount());
-        Assert.assertEquals(misses, metrics.misses.getCount());
-        Assert.assertEquals(requests, metrics.requests.getCount());
-        if (metrics instanceof AccordCacheMetrics)
-        {
-            AccordCacheMetrics ascMetrics = (AccordCacheMetrics) metrics;
-            Assert.assertEquals(sizes, ascMetrics.objectSize.getCount());
-            assertThat(ascMetrics.objectSize.getSnapshot().getMax()).isGreaterThanOrEqualTo(DEFAULT_NODE_SIZE);
-        }
+        metrics.hitRate.refresh();
+        Assert.assertEquals(hits, metrics.hits.getValue().intValue());
+        Assert.assertEquals(misses, metrics.misses.getValue().intValue());
+        Assert.assertEquals(requests, metrics.requests.getValue().intValue());
+        Assert.assertEquals(sizes, metrics.objectSize.getCount());
     }
 
-    @Before
-    public void before()
-    {
-        String type = String.format("%s-%s", AccordCommandStores.ACCORD_STATE_CACHE, UUID.randomUUID());
-        cacheMetrics = new AccordCacheMetrics(type);
-    }
-    
     @Test
     public void testAcquisitionAndRelease()
     {
+        AccordCacheMetrics cacheMetrics = new AccordCacheMetrics(nextMetricId());
+        AccordCacheMetrics.Shard shard = cacheMetrics.newShard(new NoOpLock());
+
         ManualExecutor executor = new ManualExecutor();
-        AccordCache cache = new AccordCache(wrap(executor), OnSaved.immediate(), 500, cacheMetrics);
+        AccordCache cache = new AccordCache(saveExecutor(executor), 500);
         AccordCache.Type<String, String, SafeString> type =
-            cache.newType(String.class, (s, k) -> k, (s, k, c, o) -> null, Function.identity(), (s, k, v) -> true, String::length, SafeString::new);
+            cache.newType(String.class, (s, k) -> k, (s, k, c, o) -> null, Function.identity(), (s, k, v) -> true, String::length, SafeString::new, shard);
         AccordCache.Type<String, String, SafeString>.Instance instance = type.newInstance(null);
         assertCacheState(cache, 0, 0, 0);
 
         SafeString safeString1 = instance.acquire("1");
         assertCacheState(cache, 1, 1, emptyNodeSize());
-        testLoad(executor, instance, safeString1, "1");
+        testLoad(executor, safeString1, "1");
         Assert.assertTrue(!cache.evictionQueue().iterator().hasNext());
 
         instance.release(safeString1, null);
@@ -190,45 +178,48 @@ public class AccordCacheTest
 
         SafeString safeString2 = instance.acquire("2");
         assertCacheState(cache, 1, 2, DEFAULT_NODE_SIZE + nodeSize(1));
-        testLoad(executor, instance, safeString2, "2");
+        testLoad(executor, safeString2, "2");
         instance.release(safeString2, null);
         assertCacheState(cache, 0, 2, nodeSize(1) + nodeSize(1));
 
         Assert.assertSame(safeString1.global, cache.head());
         Assert.assertSame(safeString2.global, cache.tail());
 
-        assertCacheMetrics(cache.metrics, 0, 2, 2, 2);
-        assertCacheMetrics(type.typeMetrics, 0, 2, 2, 2);
+        assertCacheMetrics(cacheMetrics, 0, 2, 2, 2);
     }
 
     @Test
     public void testCachingMetricsWithTwoInstances()
     {
+        AccordCacheMetrics cacheMetrics = new AccordCacheMetrics(nextMetricId());
+        AccordCacheMetrics.Shard shard = cacheMetrics.newShard(new NoOpLock());
+        AccordCacheMetrics.Shard shard2 = cacheMetrics.newShard(new NoOpLock());
+
         ManualExecutor executor = new ManualExecutor();
-        AccordCache cache = new AccordCache(wrap(executor), OnSaved.immediate(), 500, cacheMetrics);
+        AccordCache cache = new AccordCache(saveExecutor(executor), 500);
         AccordCache.Type<String, String, SafeString> stringType =
-        cache.newType(String.class, (s, k) -> k, (s, k, c, o) -> null, Function.identity(), (s, k, v) -> true, String::length, SafeString::new);
+        cache.newType(String.class, (s, k) -> k, (s, k, c, o) -> null, Function.identity(), (s, k, v) -> true, String::length, SafeString::new, shard);
         AccordCache.Type<String, String, SafeString>.Instance stringInstance = stringType.newInstance(null);
         AccordCache.Type<Integer, Integer, SafeInt> intType =
-        cache.newType(Integer.class, (s, k) -> k, (s, k, c, o) -> null, Function.identity(), (s, k, v) -> true, ignore -> Integer.BYTES, SafeInt::new);
+        cache.newType(Integer.class, (s, k) -> k, (s, k, c, o) -> null, Function.identity(), (s, k, v) -> true, ignore -> Integer.BYTES, SafeInt::new, shard2);
         assertCacheState(cache, 0, 0, 0);
         AccordCache.Type<Integer, Integer, SafeInt>.Instance intInstance = intType.newInstance(null);
 
         SafeString safeString1 = stringInstance.acquire("1");
-        testLoad(executor, stringInstance, safeString1, "1");
+        testLoad(executor, safeString1, "1");
         stringInstance.release(safeString1, null);
         SafeString safeString2 = stringInstance.acquire("2");
-        testLoad(executor, stringInstance, safeString2, "2");
+        testLoad(executor, safeString2, "2");
         stringInstance.release(safeString2, null);
 
         SafeInt safeInt1 = intInstance.acquire(3);
-        testLoad(executor, intInstance, safeInt1, 3);
+        testLoad(executor, safeInt1, 3);
         intInstance.release(safeInt1, null);
         SafeInt safeInt2 = intInstance.acquire(4);
-        testLoad(executor, intInstance, safeInt2, 4);
+        testLoad(executor, safeInt2, 4);
         intInstance.release(safeInt2, null);
         SafeInt safeInt3 = intInstance.acquire(5);
-        testLoad(executor, intInstance, safeInt3, 5);
+        testLoad(executor, safeInt3, 5);
         intInstance.release(safeInt3, null);
 
         assertCacheState(cache, 0, 5, nodeSize(Integer.BYTES) * 3 + nodeSize(1) * 2);
@@ -246,10 +237,13 @@ public class AccordCacheTest
     @Test
     public void testRotation()
     {
+        AccordCacheMetrics cacheMetrics = new AccordCacheMetrics(nextMetricId());
+        AccordCacheMetrics.Shard shard = cacheMetrics.newShard(new NoOpLock());
+
         ManualExecutor executor = new ManualExecutor();
-        AccordCache cache = new AccordCache(wrap(executor), OnSaved.immediate(), DEFAULT_NODE_SIZE * 5, cacheMetrics);
+        AccordCache cache = new AccordCache(saveExecutor(executor), DEFAULT_NODE_SIZE * 5);
         AccordCache.Type<String, String, SafeString> type =
-        cache.newType(String.class, (s, k) -> k, (s, k, c, o) -> null, Function.identity(), (s, k, v) -> true, String::length, SafeString::new);
+        cache.newType(String.class, (s, k) -> k, (s, k, c, o) -> null, Function.identity(), (s, k, v) -> true, String::length, SafeString::new, shard);
         assertCacheState(cache, 0, 0, 0);
         AccordCache.Type<String, String, SafeString>.Instance instance = type.newInstance(null);
 
@@ -259,7 +253,7 @@ public class AccordCacheTest
             SafeString safeString = instance.acquire(Integer.toString(i));
             items[i] = safeString;
             Assert.assertNotNull(safeString);
-            testLoad(executor, instance, safeString, Integer.toString(i));
+            testLoad(executor, safeString, Integer.toString(i));
             Assert.assertTrue(instance.isReferenced(safeString.key()));
             instance.release(safeString, null);
         }
@@ -267,15 +261,13 @@ public class AccordCacheTest
         Assert.assertSame(items[0].global, cache.head());
         Assert.assertSame(items[2].global, cache.tail());
         assertCacheState(cache, 0, 3, nodeSize(1) * 3);
-        assertCacheMetrics(cache.metrics, 0, 3, 3, 3);
-        assertCacheMetrics(type.typeMetrics, 0, 3, 3, 3);
+        assertCacheMetrics(cacheMetrics, 0, 3, 3, 3);
 
         SafeString safeString = instance.acquire("1");
         Assert.assertEquals(Status.LOADED, safeString.global.status());
 
         assertCacheState(cache, 1, 3, nodeSize(1) * 3);
-        assertCacheMetrics(cache.metrics, 1, 3, 4, 3);
-        assertCacheMetrics(type.typeMetrics, 1, 3, 4, 3);
+        assertCacheMetrics(cacheMetrics, 1, 3, 4, 3);
 
         // releasing item should return it to the tail
         instance.release(safeString, null);
@@ -287,10 +279,14 @@ public class AccordCacheTest
     @Test
     public void testEvictionOnAcquire()
     {
+        AccordCacheMetrics cacheMetrics = new AccordCacheMetrics(nextMetricId());
+        NoOpLock lock = new NoOpLock();
+        AccordCacheMetrics.Shard shard = cacheMetrics.newShard(lock);
+
         ManualExecutor executor = new ManualExecutor();
-        AccordCache cache = new AccordCache(wrap(executor), OnSaved.immediate(), nodeSize(1) * 5, cacheMetrics);
+        AccordCache cache = new AccordCache(saveExecutor(executor), nodeSize(1) * 5);
         AccordCache.Type<String, String, SafeString> type =
-        cache.newType(String.class, (s, k) -> k, (s, k, c, o) -> null, Function.identity(), (s, k, v) -> true, String::length, SafeString::new);
+        cache.newType(String.class, (s, k) -> k, (s, k, c, o) -> null, Function.identity(), (s, k, v) -> true, String::length, SafeString::new, shard);
         AccordCache.Type<String, String, SafeString>.Instance instance = type.newInstance(null);
         assertCacheState(cache, 0, 0, 0);
 
@@ -299,18 +295,19 @@ public class AccordCacheTest
         {
             SafeString safeString = instance.acquire(Integer.toString(i));
             items[i] = safeString;
-            testLoad(executor, instance, safeString, Integer.toString(i));
+            testLoad(executor, safeString, Integer.toString(i));
             Assert.assertTrue(instance.isReferenced(safeString.key()));
             instance.release(safeString, null);
+            cache.tryShrinkOrEvict(lock);
         }
 
         assertCacheState(cache, 0, 5, nodeSize(1) * 5);
         Assert.assertSame(items[0].global, cache.head());
         Assert.assertSame(items[4].global, cache.tail());
-        assertCacheMetrics(cache.metrics, 0, 5, 5, 5);
-        assertCacheMetrics(type.typeMetrics, 0, 5, 5, 5);
+        assertCacheMetrics(cacheMetrics, 0, 5, 5, 5);
 
         SafeString safeString = instance.acquire("5");
+        cache.tryShrinkOrEvict(lock);
         Assert.assertTrue(instance.isReferenced(safeString.key()));
 
         // since it's not loaded, only the node size is counted here
@@ -319,25 +316,27 @@ public class AccordCacheTest
         Assert.assertSame(items[4].global, cache.tail());
         Assert.assertFalse(instance.keyIsCached("0", SafeString.class));
         Assert.assertFalse(instance.keyIsReferenced("0", SafeString.class));
-        assertCacheMetrics(cache.metrics, 0, 6, 6, 5);
-        assertCacheMetrics(type.typeMetrics, 0, 6, 6, 5);
+        assertCacheMetrics(cacheMetrics, 0, 6, 6, 5);
 
-        testLoad(executor, instance, safeString, "5");
+        testLoad(executor, safeString, "5");
         instance.release(safeString, null);
         assertCacheState(cache, 0, 5, nodeSize(1) * 5);
         Assert.assertSame(items[1].global, cache.head());
         Assert.assertSame(safeString.global, cache.tail());
-        assertCacheMetrics(cache.metrics, 0, 6, 6, 6);
-        assertCacheMetrics(type.typeMetrics, 0, 6, 6, 6);
+        assertCacheMetrics(cacheMetrics, 0, 6, 6, 5);
     }
 
     @Test
     public void testEvictionOnRelease()
     {
+        AccordCacheMetrics cacheMetrics = new AccordCacheMetrics(nextMetricId());
+        NoOpLock lock = new NoOpLock();
+        AccordCacheMetrics.Shard shard = cacheMetrics.newShard(lock);
+
         ManualExecutor executor = new ManualExecutor();
-        AccordCache cache = new AccordCache(wrap(executor), OnSaved.immediate(), nodeSize(1) * 4, cacheMetrics);
+        AccordCache cache = new AccordCache(saveExecutor(executor), nodeSize(1) * 4);
         AccordCache.Type<String, String, SafeString> type =
-        cache.newType(String.class, (s, k) -> k, (s, k, c, o) -> null, Function.identity(), (s, k, v) -> true, String::length, SafeString::new);
+        cache.newType(String.class, (s, k) -> k, (s, k, c, o) -> null, Function.identity(), (s, k, v) -> true, String::length, SafeString::new, shard);
         AccordCache.Type<String, String, SafeString>.Instance instance = type.newInstance(null);
         assertCacheState(cache, 0, 0, 0);
 
@@ -346,27 +345,27 @@ public class AccordCacheTest
         {
             SafeString safeString = instance.acquire(Integer.toString(i));
             items[i] = safeString;
-            testLoad(executor, instance, safeString, Integer.toString(i));
+            testLoad(executor, safeString, Integer.toString(i));
             Assert.assertTrue(instance.isReferenced(safeString.key()));
+            cache.tryShrinkOrEvict(lock);
         }
 
         assertCacheState(cache, 5, 5, nodeSize(1) * 5);
-        assertCacheMetrics(cache.metrics, 0, 5, 5, 5);
-        assertCacheMetrics(type.typeMetrics, 0, 5, 5, 5);
+        assertCacheMetrics(cacheMetrics, 0, 5, 5, 5);
         Assert.assertNull(cache.head());
         Assert.assertNull(cache.tail());
 
         instance.release(items[2], null);
+        cache.tryShrinkOrEvict(lock);
         assertCacheState(cache, 4, 4, nodeSize(1) * 4);
-        assertCacheMetrics(cache.metrics, 0, 5, 5, 5);
-        assertCacheMetrics(type.typeMetrics, 0, 5, 5, 5);
+        assertCacheMetrics(cacheMetrics, 0, 5, 5, 5);
         Assert.assertNull(cache.head());
         Assert.assertNull(cache.tail());
 
         instance.release(items[4], null);
+        cache.tryShrinkOrEvict(lock);
         assertCacheState(cache, 3, 4, nodeSize(1) * 4);
-        assertCacheMetrics(cache.metrics, 0, 5, 5, 5);
-        assertCacheMetrics(type.typeMetrics, 0, 5, 5, 5);
+        assertCacheMetrics(cacheMetrics, 0, 5, 5, 5);
         Assert.assertSame(items[4].global, cache.head());
         Assert.assertSame(items[4].global, cache.tail());
     }
@@ -374,18 +373,20 @@ public class AccordCacheTest
     @Test
     public void testMultiAcquireRelease()
     {
+        AccordCacheMetrics cacheMetrics = new AccordCacheMetrics(nextMetricId());
+        AccordCacheMetrics.Shard shard = cacheMetrics.newShard(new NoOpLock());
+
         ManualExecutor executor = new ManualExecutor();
-        AccordCache cache = new AccordCache(wrap(executor), OnSaved.immediate(), DEFAULT_NODE_SIZE * 4, cacheMetrics);
+        AccordCache cache = new AccordCache(saveExecutor(executor), DEFAULT_NODE_SIZE * 4);
         AccordCache.Type<String, String, SafeString> type =
-        cache.newType(String.class, (s, k) -> k, (s, k, c, o) -> null, Function.identity(), (s, k, v) -> true, String::length, SafeString::new);
+        cache.newType(String.class, (s, k) -> k, (s, k, c, o) -> null, Function.identity(), (s, k, v) -> true, String::length, SafeString::new, shard);
         AccordCache.Type<String, String, SafeString>.Instance instance = type.newInstance(null);
         assertCacheState(cache, 0, 0, 0);
 
         SafeString safeString1 = instance.acquire("0");
-        testLoad(executor, instance, safeString1, "0");
+        testLoad(executor, safeString1, "0");
         Assert.assertEquals(Status.LOADED, safeString1.global.status());
-        assertCacheMetrics(cache.metrics, 0, 1, 1, 1);
-        assertCacheMetrics(type.typeMetrics, 0, 1, 1, 1);
+        assertCacheMetrics(cacheMetrics, 0, 1, 1, 1);
 
         Assert.assertEquals(1, instance.references("0", SafeString.class));
         assertCacheState(cache, 1, 1, nodeSize(1));
@@ -395,8 +396,7 @@ public class AccordCacheTest
         Assert.assertEquals(Status.LOADED, safeString1.global.status());
         Assert.assertEquals(2, instance.references("0", SafeString.class));
         assertCacheState(cache, 1, 1, nodeSize(1));
-        assertCacheMetrics(cache.metrics, 1, 1, 2, 1);
-        assertCacheMetrics(type.typeMetrics, 1, 1, 2, 1);
+        assertCacheMetrics(cacheMetrics, 1, 1, 2, 1);
 
         instance.release(safeString1, null);
         assertCacheState(cache, 1, 1, nodeSize(1));
@@ -407,15 +407,19 @@ public class AccordCacheTest
     @Test
     public void evictionBlockedOnSaving()
     {
+        AccordCacheMetrics cacheMetrics = new AccordCacheMetrics(nextMetricId());
+        NoOpLock lock = new NoOpLock();
+        AccordCacheMetrics.Shard shard = cacheMetrics.newShard(lock);
+
         ManualExecutor executor = new ManualExecutor();
-        AccordCache cache = new AccordCache(wrap(executor), OnSaved.immediate(), nodeSize(1) * 3 + nodeSize(3), cacheMetrics);
+        AccordCache cache = new AccordCache(saveExecutor(executor), nodeSize(1) * 3 + nodeSize(3));
         AccordCache.Type<String, String, SafeString> type =
-        cache.newType(String.class, (s, k) -> k, (s, k, c, o) -> null, Function.identity(), (s, k, v) -> true, String::length, SafeString::new);
+        cache.newType(String.class, (s, k) -> k, (s, k, c, o) -> null, Function.identity(), (s, k, v) -> true, String::length, SafeString::new, shard);
         AccordCache.Type<String, String, SafeString>.Instance instance = type.newInstance(null);
         assertCacheState(cache, 0, 0, 0);
 
         SafeString item = instance.acquire(Integer.toString(0));
-        testLoad(executor, instance, item, Integer.toString(0));
+        testLoad(executor, item, Integer.toString(0));
         item.set("0*");
         Assert.assertTrue(instance.isReferenced(item.key()));
         instance.release(item, null);
@@ -423,18 +427,19 @@ public class AccordCacheTest
         for (int i=1; i<4; i++)
         {
             item = instance.acquire(Integer.toString(i));
-            testLoad(executor, instance, item, Integer.toString(i));
+            testLoad(executor, item, Integer.toString(i));
             Assert.assertTrue(instance.isReferenced(item.key()));
             instance.release(item, null);
+            cache.tryShrinkOrEvict(lock);
         }
 
         assertCacheState(cache, 0, 4, nodeSize(1) * 3 + nodeSize(2));
-        assertCacheMetrics(cache.metrics, 0, 4, 4, 5);
-        assertCacheMetrics(type.typeMetrics, 0, 4, 4, 5);
+        assertCacheMetrics(cacheMetrics, 0, 4, 4, 4);
 
         // force cache eviction
         instance.acquire(Integer.toString(0));
         cache.setCapacity(0);
+        cache.tryShrinkOrEvict(lock);
 
         // all should have been evicted except 0
         assertCacheState(cache, 1, 1, nodeSize(2));
@@ -448,15 +453,18 @@ public class AccordCacheTest
     @Test
     public void testUpdates()
     {
+        AccordCacheMetrics cacheMetrics = new AccordCacheMetrics(nextMetricId());
+        AccordCacheMetrics.Shard shard = cacheMetrics.newShard(new NoOpLock());
+
         ManualExecutor executor = new ManualExecutor();
-        AccordCache cache = new AccordCache(wrap(executor), OnSaved.immediate(), 500, cacheMetrics);
+        AccordCache cache = new AccordCache(saveExecutor(executor), 500);
         AccordCache.Type<String, String, SafeString> type =
-        cache.newType(String.class, (s, k) -> k, (s, k, c, o) -> null, Function.identity(), (s, k, v) -> true, String::length, SafeString::new);
+        cache.newType(String.class, (s, k) -> k, (s, k, c, o) -> null, Function.identity(), (s, k, v) -> true, String::length, SafeString::new, shard);
         AccordCache.Type<String, String, SafeString>.Instance instance = type.newInstance(null);
         assertCacheState(cache, 0, 0, 0);
 
         SafeString safeString = instance.acquire("1");
-        testLoad(executor, instance, safeString, "1");
+        testLoad(executor, safeString, "1");
         assertCacheState(cache, 1, 1, nodeSize(1));
         Assert.assertNull(cache.head());
         Assert.assertNull(cache.tail());
@@ -470,8 +478,7 @@ public class AccordCacheTest
         Assert.assertSame(safeString.global, cache.head());
         Assert.assertSame(safeString.global, cache.tail());
 
-        assertCacheMetrics(cache.metrics, 0, 1, 1, 2);
-        assertCacheMetrics(type.typeMetrics, 0, 1, 1, 2);
+        assertCacheMetrics(cacheMetrics, 0, 1, 1, 1);
     }
 
     private CacheSize mockCacheSize(long capacity, long size, int entries)
@@ -483,23 +490,15 @@ public class AccordCacheTest
         return cacheSize;
     }
 
-    @Test
-    public void testAccorStateCacheMetrics()
+    private static SaveExecutor saveExecutor(ExecutorPlus executor)
     {
-        CacheAccessMetrics stringInstance1 = cacheMetrics.forInstance(String.class);
-        CacheAccessMetrics stringInstance1Dup = cacheMetrics.forInstance(String.class);
-        CacheAccessMetrics stringInstance2 = cacheMetrics.forInstance(String.class);
-        CacheAccessMetrics integerInstance1 = cacheMetrics.forInstance(Integer.class);
-        CacheAccessMetrics integerInstance2 = cacheMetrics.forInstance(Integer.class);
-
-        assertThat(stringInstance1).isSameAs(stringInstance1Dup);
-        assertThat(stringInstance1).isSameAs(stringInstance2);
-        assertThat(integerInstance1).isSameAs(integerInstance2);
-        assertThat(stringInstance1).isNotSameAs(integerInstance1);
-    }
-    
-    private static Function<Runnable, Cancellable> wrap(ExecutorPlus executor)
-    {
-        return r -> AccordExecutor.wrap(executor.submit(r));
+        return (saving, identity, save) -> {
+            executor.submit(() -> {
+                try { save.run(); }
+                catch (Throwable t) { saving.saved(identity, t); throw t; }
+                saving.saved(identity, null);
+            });
+            return null;
+        };
     }
 }

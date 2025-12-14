@@ -39,10 +39,7 @@ public abstract class CompressedChunkReaderTest
                                      .build();
     }
 
-    enum CompressionKind
-    {
-        Noop, Snappy, Deflate, Lz4, Zstd
-    }
+    private enum CompressionKind { Noop, Snappy, Deflate, Lz4, Zstd }
 
     static Gen<CompressionParams> compressionParams(Gen<Integer> chunkLengths)
     {
@@ -51,18 +48,12 @@ public abstract class CompressedChunkReaderTest
             CompressionKind kind = rs.pick(CompressionKind.values());
             switch (kind)
             {
-                case Noop:
-                    return CompressionParams.noop();
-                case Snappy:
-                    return CompressionParams.snappy(chunkLengths.next(rs), compressionRatio.next(rs));
-                case Deflate:
-                    return CompressionParams.deflate(chunkLengths.next(rs));
-                case Lz4:
-                    return CompressionParams.lz4(chunkLengths.next(rs));
-                case Zstd:
-                    return CompressionParams.zstd(chunkLengths.next(rs));
-                default:
-                    throw new UnsupportedOperationException(kind.name());
+                case Noop: return CompressionParams.noop();
+                case Snappy: return CompressionParams.snappy(chunkLengths.next(rs), compressionRatio.next(rs));
+                case Deflate: return CompressionParams.deflate(chunkLengths.next(rs));
+                case Lz4: return CompressionParams.lz4(chunkLengths.next(rs));
+                case Zstd: return CompressionParams.zstd(chunkLengths.next(rs));
+                default: throw new UnsupportedOperationException(kind.name());
             }
         };
     }

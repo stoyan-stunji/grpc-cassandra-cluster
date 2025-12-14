@@ -22,6 +22,9 @@ import java.io.IOException;
 import java.util.AbstractList;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.List;
+
+import com.google.common.annotations.VisibleForTesting;
 
 import accord.utils.Invariants;
 import accord.utils.SortedArrays;
@@ -97,6 +100,14 @@ public abstract class TableMetadatas extends AbstractList<TableId>
     public static Complete of(TableMetadata metadata)
     {
         return new One(metadata);
+    }
+
+    @VisibleForTesting
+    public static Complete of(List<TableMetadata> values)
+    {
+        Collector collector = new Collector();
+        collector.addAll(values);
+        return collector.build();
     }
 
     public static Complete ofSortedUnique(TableMetadata ... metadatas)
@@ -329,6 +340,9 @@ public abstract class TableMetadatas extends AbstractList<TableId>
         @Override
         public void serialize(TableMetadata table, DataOutputPlus out) throws IOException
         {
+            if (ids.length == 1)
+                return;
+
             int i = indexOf(table);
             if (i < 0)
                 throw new IllegalStateException("TableMetadata for " + table + " not found in " + this);
@@ -346,6 +360,9 @@ public abstract class TableMetadatas extends AbstractList<TableId>
         @Override
         public TableMetadata deserialize(DataInputPlus in) throws IOException
         {
+            if (ids.length == 1)
+                return metadatas[0];
+
             int index = in.readUnsignedVInt32();
             TableMetadata metadata = metadatas[index];
             if (metadata == null)
@@ -356,6 +373,9 @@ public abstract class TableMetadatas extends AbstractList<TableId>
         @Override
         public long serializedSize(TableMetadata table)
         {
+            if (ids.length == 1)
+                return 0;
+
             int i = indexOf(table);
             if (i < 0)
                 throw new IllegalStateException("TableMetadata for " + table + " not found in " + this);
@@ -384,6 +404,7 @@ public abstract class TableMetadatas extends AbstractList<TableId>
         int count = in.readUnsignedVInt32();
         if (count == 0)
             return none();
+
         if (count == 1)
         {
             TableId id = TableId.deserializeCompactComparable(in);
@@ -392,6 +413,7 @@ public abstract class TableMetadatas extends AbstractList<TableId>
                 return new WithUnknown(new TableId[] { id}, new TableMetadata[] { null });
             return new One(metadata);
         }
+
         TableId[] ids = null;
         TableMetadata[] metadatas = new TableMetadata[count];
         int i;

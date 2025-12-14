@@ -37,6 +37,8 @@ public final class SystemViewsKeyspace extends VirtualKeyspace
                     .add(new ClientsTable(VIRTUAL_VIEWS))
                     .add(new SettingsTable(VIRTUAL_VIEWS))
                     .add(new SystemPropertiesTable(VIRTUAL_VIEWS))
+                    .add(new SchemaCommentsTable(VIRTUAL_VIEWS))
+                    .add(new SchemaSecurityLabelsTable(VIRTUAL_VIEWS))
                     .add(new SSTableTasksTable(VIRTUAL_VIEWS))
                     // Fully backward/forward compatible with the legace ThreadPoolsTable under the same "system_views.thread_pools" name.
                     .add(CollectionVirtualTableAdapter.create(VIRTUAL_VIEWS,
@@ -71,6 +73,7 @@ public final class SystemViewsKeyspace extends VirtualKeyspace
                     .addAll(CIDRFilteringMetricsTable.getAll(VIRTUAL_VIEWS))
                     .addAll(StorageAttachedIndexTables.getAll(VIRTUAL_VIEWS))
                     .addAll(AccordVirtualTables.getAll(VIRTUAL_VIEWS))
+                    .add(new ExceptionsTable(VIRTUAL_VIEWS))
                     .build());
     }
 }

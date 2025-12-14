@@ -57,14 +57,11 @@ public class AccordSpec
         /**
          * Same number of threads as queue shards, but the shard lock is held only while managing the queue,
          * so that submitting threads may queue load/save work.
-         *
-         * The global READ and WRITE stages are used for IO.
          */
         THREAD_PER_SHARD,
 
         /**
          * Same number of threads as shards, and the shard lock is held for the duration of serving requests.
-         * The global READ and WRITE stages are used for IO.
          */
         THREAD_PER_SHARD_SYNC_QUEUE,
 
@@ -73,12 +70,6 @@ public class AccordSpec
          * Fewer shards is generally better, until queue-contention is encountered.
          */
         THREAD_POOL_PER_SHARD,
-
-        /**
-         * More threads than shards. Threads update transaction state only, relying on READ and WRITE stages for IO.
-         * Fewer shards is generally better, until queue-contention is encountered.
-         */
-        THREAD_POOL_PER_SHARD_EXCLUDES_IO,
     }
 
     public enum QueueSubmissionModel
@@ -103,7 +94,7 @@ public class AccordSpec
 
         /**
          * The queue is backed by submission to a single-threaded plain executor.
-         * This implementation does not honur the sharding model option.
+         * This implementation does not honor the sharding model option.
          *
          * Note: this isn't intended to be used by real clusters.
          */
@@ -131,6 +122,9 @@ public class AccordSpec
     public volatile OptionaldPositiveInt max_queued_loads = OptionaldPositiveInt.UNDEFINED;
     public volatile OptionaldPositiveInt max_queued_range_loads = OptionaldPositiveInt.UNDEFINED;
 
+    public volatile OptionaldPositiveInt progress_log_concurrency = OptionaldPositiveInt.UNDEFINED;
+    public DurationSpec.IntMillisecondsBound progress_log_query_fallback_timeout = new DurationSpec.IntMillisecondsBound("1m");
+
     public DataStorageSpec.LongMebibytesBound cache_size = null;
     public DataStorageSpec.LongMebibytesBound working_set_size = null;
     public boolean shrink_cache_entries_before_eviction = true;
@@ -149,16 +143,18 @@ public class AccordSpec
     public String slow_syncpoint_preaccept = "10s";
     public String slow_txn_preaccept = "30ms <= p50*2 <= 100ms";
     public String slow_read = "30ms <= p50*2 <= 100ms";
-    public StringRetryStrategy retry_syncpoint = new StringRetryStrategy("10s*attempts <= 600s");
-    public StringRetryStrategy retry_durability = new StringRetryStrategy("10s*attempts <= 600s");
-    public StringRetryStrategy retry_bootstrap = new StringRetryStrategy("10s*attempts <= 600s");
-    public StringRetryStrategy retry_fetch_min_epoch = new StringRetryStrategy("200ms...1s*attempts <= 1s,retries=3");
-    public StringRetryStrategy retry_fetch_topology = new StringRetryStrategy("200ms...1s*attempts <= 1s,retries=100");
+    public StringRetryStrategy retry_syncpoint = new StringRetryStrategy("10s*attempt <= 600s");
+    public StringRetryStrategy retry_durability = new StringRetryStrategy("10s*attempt <= 600s");
+    public StringRetryStrategy retry_bootstrap = new StringRetryStrategy("10s*attempt <= 600s");
+    public StringRetryStrategy retry_join_bootstrap = new StringRetryStrategy("30s*attempt,attempts=5");
+    public StringRetryStrategy retry_fetch_min_epoch = new StringRetryStrategy("200ms...1s*attempt <= 1s,retries=3");
+    public StringRetryStrategy retry_fetch_topology = new StringRetryStrategy("200ms...1s*attempt <= 1s,retries=100");
+    public StringRetryStrategy retry_journal_index_ready = new StringRetryStrategy("100ms");
 
     public volatile DurationSpec.IntSecondsBound fast_path_update_delay = null;
 
-    public volatile DurationSpec.IntSecondsBound gc_delay = new DurationSpec.IntSecondsBound("5m");
     public volatile int shard_durability_target_splits = 16;
+    public volatile int shard_durability_max_splits = 128;
     public volatile DurationSpec.IntSecondsBound durability_txnid_lag = new DurationSpec.IntSecondsBound(5);
     public volatile DurationSpec.IntSecondsBound shard_durability_cycle = new DurationSpec.IntSecondsBound(5, TimeUnit.MINUTES);
     public volatile DurationSpec.IntSecondsBound global_durability_cycle = new DurationSpec.IntSecondsBound(5, TimeUnit.MINUTES);
@@ -182,12 +178,28 @@ public class AccordSpec
     public TransactionalMode default_transactional_mode = TransactionalMode.off;
     public boolean ephemeralReadEnabled = true;
     public boolean state_cache_listener_jfr_enabled = true;
+
+    public DurationSpec.IntSecondsBound catchup_on_start_success_latency = new DurationSpec.IntSecondsBound(60);
+    public DurationSpec.IntSecondsBound catchup_on_start_fail_latency = new DurationSpec.IntSecondsBound(900);
+    public int catchup_on_start_max_attempts = 5;
+    public boolean catchup_on_start_exit_on_failure = true;
+    public boolean catchup_on_start = true;
+
     public final JournalSpec journal = new JournalSpec();
+
+    public enum MixedTimeSourceHandling
+    {
+        reject, log, ignore
+    }
+
+    public volatile MixedTimeSourceHandling mixedTimeSourceHandling = MixedTimeSourceHandling.reject;
 
     public static class JournalSpec implements Params
     {
         public int segmentSize = 32 << 20;
+        public int compactMaxSegments = 32;
         public FailurePolicy failurePolicy = FailurePolicy.STOP;
+        public ReplayMode replayMode = ReplayMode.ONLY_NON_DURABLE;
         public FlushMode flushMode = FlushMode.PERIODIC;
         public volatile DurationSpec flushPeriod; // pulls default from 'commitlog_sync_period'
         public DurationSpec periodicFlushLagBlock = new DurationSpec.IntMillisecondsBound("1500ms");
@@ -195,10 +207,11 @@ public class AccordSpec
         private volatile long flushCombinedBlockPeriod = Long.MIN_VALUE;
         public Version version = Version.DOWNGRADE_SAFE_VERSION;
 
-        public void setFlushPeriod(DurationSpec newFlushPeriod)
+        public JournalSpec setFlushPeriod(DurationSpec newFlushPeriod)
         {
             flushPeriod = newFlushPeriod;
             flushCombinedBlockPeriod = Long.MIN_VALUE;
+            return this;
         }
 
         public void setPeriodicFlushLagBlock(DurationSpec newPeriodicFlushLagBlock)
@@ -214,9 +227,21 @@ public class AccordSpec
         }
 
         @Override
+        public int compactMaxSegments()
+        {
+            return compactMaxSegments;
+        }
+
+        @Override
         public FailurePolicy failurePolicy()
         {
             return failurePolicy;
+        }
+
+        @Override
+        public ReplayMode replayMode()
+        {
+            return replayMode;
         }
 
         @Override

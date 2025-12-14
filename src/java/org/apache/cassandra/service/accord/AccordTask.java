@@ -17,6 +17,7 @@
  */
 package org.apache.cassandra.service.accord;
 
+import java.nio.ByteBuffer;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -27,20 +28,21 @@ import java.util.concurrent.CancellationException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
 import java.util.function.BiConsumer;
-import java.util.function.BiFunction;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.slf4j.MDC;
 
 import accord.api.Journal;
 import accord.api.RoutingKey;
 import accord.local.Command;
 import accord.local.CommandStore;
+import accord.local.LoadKeys;
 import accord.local.PreLoadContext;
 import accord.local.SafeCommandStore;
 import accord.local.cfk.CommandsForKey;
@@ -51,21 +53,29 @@ import accord.primitives.Ranges;
 import accord.primitives.TxnId;
 import accord.primitives.Unseekables;
 import accord.utils.Invariants;
+import accord.utils.UnhandledEnum;
 import accord.utils.async.AsyncChain;
 import accord.utils.async.AsyncChains;
 import accord.utils.async.Cancellable;
 import org.agrona.collections.Object2ObjectHashMap;
 import org.agrona.collections.ObjectHashSet;
+import org.apache.cassandra.concurrent.DebuggableTask;
+import org.apache.cassandra.metrics.LogLinearDecayingHistograms;
 import org.apache.cassandra.service.accord.AccordCacheEntry.Status;
 import org.apache.cassandra.service.accord.AccordCommandStore.Caches;
-import org.apache.cassandra.service.accord.AccordExecutor.Task;
+import org.apache.cassandra.service.accord.AccordExecutor.SubmittableTask;
 import org.apache.cassandra.service.accord.AccordExecutor.TaskQueue;
 import org.apache.cassandra.service.accord.AccordKeyspace.CommandsForKeyAccessor;
 import org.apache.cassandra.service.accord.api.TokenKey;
+import org.apache.cassandra.service.accord.serializers.CommandSerializers;
+import org.apache.cassandra.tracing.Tracing;
 import org.apache.cassandra.utils.Clock;
+import org.apache.cassandra.utils.Closeable;
 import org.apache.cassandra.utils.NoSpamLogger;
 import org.apache.cassandra.utils.concurrent.Condition;
 
+import static accord.local.LoadKeysFor.RECOVERY;
+import static accord.local.LoadKeysFor.WRITE;
 import static accord.primitives.Routable.Domain.Key;
 import static accord.primitives.Txn.Kind.EphemeralRead;
 import static accord.utils.Invariants.illegalState;
@@ -85,17 +95,11 @@ import static org.apache.cassandra.service.accord.AccordTask.State.WAITING_TO_RU
 import static org.apache.cassandra.service.accord.AccordTask.State.WAITING_TO_SCAN_RANGES;
 import static org.apache.cassandra.utils.Clock.Global.nanoTime;
 
-public abstract class AccordTask<R> extends Task implements Runnable, Function<SafeCommandStore, R>, Cancellable
+public abstract class AccordTask<R> extends SubmittableTask implements Function<SafeCommandStore, R>, Cancellable, DebuggableTask
 {
     private static final Logger logger = LoggerFactory.getLogger(AccordTask.class);
     private static final NoSpamLogger noSpamLogger = NoSpamLogger.getLogger(logger, 1, TimeUnit.MINUTES);
     private static final boolean SANITY_CHECK = DTEST_ACCORD_JOURNAL_SANITY_CHECK_ENABLED.getBoolean();
-
-    private static class LoggingProps
-    {
-        private static final String COMMAND_STORE = "command_store";
-        private static final String ACCORD_TASK = "accord_task";
-    }
 
     static class ForFunction<R> extends AccordTask<R>
     {
@@ -190,15 +194,18 @@ public abstract class AccordTask<R> extends Task implements Runnable, Function<S
     }
 
     private State state = INITIALIZED;
+    final AccordCommandStore commandStore;
     private final PreLoadContext preLoadContext;
-    private final String loggingId;
+    private volatile String loggingId;
     private static final AtomicLong nextLoggingId = new AtomicLong(Clock.Global.currentTimeMillis());
+    private static final AtomicReferenceFieldUpdater<AccordTask, String> loggingIdUpdater = AtomicReferenceFieldUpdater.newUpdater(AccordTask.class, String.class, "loggingId");
 
-    // TODO (expected): merge all of these maps into one
+    // TODO (desired): merge all of these maps into one
     @Nullable Object2ObjectHashMap<TxnId, AccordSafeCommand> commands;
     @Nullable Object2ObjectHashMap<RoutingKey, AccordSafeCommandsForKey> commandsForKey;
     @Nullable Object2ObjectHashMap<Object, AccordSafeState<?, ?>> loading;
-    // TODO (expected): collection supporting faster deletes but still fast poll (e.g. some ordered collection)
+    LogLinearDecayingHistograms.Buffer histogramBuffer;
+    // TODO (desired): collection supporting faster deletes but still fast poll (e.g. some ordered collection)
     @Nullable ArrayDeque<AccordCacheEntry<?, ?>> waitingToLoad;
     @Nullable RangeTxnScanner rangeScanner;
     boolean hasRanges;
@@ -207,43 +214,40 @@ public abstract class AccordTask<R> extends Task implements Runnable, Function<S
 
     private BiConsumer<? super R, Throwable> callback;
     private List<Command> sanityCheck;
-    public long createdAt = nanoTime(), loadedAt, runQueuedAt, runAt, completedAt;
+    public long createdAt = nanoTime(), waitingToRunAt, runningAt, completedAt;
 
-    private void setLoggingIds()
+    public AccordTask(@Nonnull AccordCommandStore commandStore, PreLoadContext preLoadContext)
     {
-        MDC.put(LoggingProps.COMMAND_STORE, commandStore.loggingId);
-        MDC.put(LoggingProps.ACCORD_TASK, loggingId);
-    }
-
-    private void clearLoggingIds()
-    {
-        MDC.remove(LoggingProps.COMMAND_STORE);
-        MDC.remove(LoggingProps.ACCORD_TASK);
-    }
-
-    public AccordTask(AccordCommandStore commandStore, PreLoadContext preLoadContext)
-    {
-        super(commandStore);
-        this.loggingId = "0x" + Long.toHexString(nextLoggingId.incrementAndGet());
+        this.commandStore = commandStore;
         this.preLoadContext = preLoadContext;
+        this.loggingId = "0x" + Long.toHexString(nextLoggingId.incrementAndGet());
 
         if (logger.isTraceEnabled())
-        {
-            setLoggingIds();
             logger.trace("Created {} on {}", this, commandStore);
-            clearLoggingIds();
+    }
+
+    private String loggingId()
+    {
+        String id = loggingId;
+        if (id == null)
+        {
+            TxnId primaryTxnId = preLoadContext.primaryTxnId();
+            id = "0x" + Long.toHexString(nextLoggingId.incrementAndGet()) + (primaryTxnId != null ? '/' + primaryTxnId.toString() : "");
+            if (!loggingIdUpdater.compareAndSet(this, null, id))
+                id = loggingId;
         }
+        return id;
     }
 
     @Override
     public String toString()
     {
-        return "AccordTask{" + state + "}-" + loggingId;
+        return "AccordTask{" + state + "}-" + loggingId();
     }
 
     public String toDescription()
     {
-        return "AccordTask{" + state + "}-" + loggingId + ": "
+        return "AccordTask{" + state + "}-" + loggingId() + ": "
                + (queued == null ? "unqueued" : queued.kind)
                + ", primaryTxnId: " + preLoadContext.primaryTxnId()
                + ", waitingToLoad: " + summarise(waitingToLoad)
@@ -298,13 +302,21 @@ public abstract class AccordTask<R> extends Task implements Runnable, Function<S
         {
             Invariants.require(rangeScanner == null || rangeScanner.scanned);
             Invariants.require(loading == null && waitingToLoad == null, "WAITING_TO_RUN => no loading or waiting; found %s", this, AccordTask::toDescription);
-            loadedAt = nanoTime();
+            waitingToRunAt = nanoTime();
+            commandStore.executor().elapsedPreparingToRun.increment(waitingToRunAt - createdAt, runningAt);
         }
         else if (state == RUNNING)
         {
-            runAt = nanoTime();
+            runningAt = nanoTime();
+            if (waitingToRunAt == 0)
+            {
+                waitingToRunAt = runningAt;
+                commandStore.executor().elapsedPreparingToRun.increment(waitingToRunAt - createdAt, runningAt);
+            }
+            commandStore.executor().elapsedWaitingToRun.increment(runningAt - waitingToRunAt, runningAt);
+            commandStore.executor().keys.increment(commandsForKey == null ? 0 : commandsForKey.size(), runningAt);
         }
-        else if (state.isExecuted())
+        else if (state.isExecuted() && completedAt == 0)
         {
             completedAt = nanoTime();
         }
@@ -315,6 +327,8 @@ public abstract class AccordTask<R> extends Task implements Runnable, Function<S
         return preLoadContext.keys();
     }
 
+    // TODO (expected): try to execute immediately BUT consider ordering requirements
+    //  esp. with deferred actions on e.g. CommandsForKey (not yet supported but also important for performance)
     public AsyncChain<R> chain()
     {
         return new AsyncChains.Head<>()
@@ -334,6 +348,7 @@ public abstract class AccordTask<R> extends Task implements Runnable, Function<S
     // to be invoked only by the CommandStore owning thread, to take references to objects already in use by the current execution
     public void presetup(AccordTask<?> parent)
     {
+        this.queuePosition = parent.queuePosition;
         // note we use the caches "unsafely" here deliberately, as we only reference commands we already have references to
         // so we do not mutate anything, except the atomic counter of references
         if (parent.commands != null)
@@ -344,20 +359,25 @@ public abstract class AccordTask<R> extends Task implements Runnable, Function<S
 
         if (parent.commandsForKey == null) return;
         if (preLoadContext.keys().domain() != Key) return;
-        switch (preLoadContext.keyHistory())
+        switch (preLoadContext.loadKeys())
         {
-            default: throw new AssertionError("Unhandled KeyHistory: " + preLoadContext.keyHistory());
+            default: throw new UnhandledEnum(preLoadContext.loadKeys());
             case NONE:
                 break;
 
             case ASYNC:
-            case RECOVER:
             case INCR:
             case SYNC:
                 for (RoutingKey key : (AbstractUnseekableKeys)preLoadContext.keys())
                     presetupExclusive(key, AccordTask::ensureCommandsForKey, parent.commandsForKey, commandStore.cachesUnsafe().commandsForKeys());
                 break;
         }
+    }
+
+    @Override
+    void submitExclusive(AccordExecutor owner)
+    {
+        owner.submitExclusive(this);
     }
 
     public void setupExclusive()
@@ -392,39 +412,31 @@ public abstract class AccordTask<R> extends Task implements Runnable, Function<S
 
     private void setupKeyLoadsExclusive(Caches caches, Iterable<? extends RoutingKey> keys, boolean isToCompleteRangeScan)
     {
-        switch (preLoadContext.keyHistory())
+        if (preLoadContext.loadKeys() == LoadKeys.NONE)
+            return;
+
+        if (!isToCompleteRangeScan && preLoadContext.loadKeysFor() == RECOVERY)
         {
-            default: throw new AssertionError("Unhandled KeyHistory: " + preLoadContext.keyHistory());
-            case NONE:
-                break;
+            Invariants.require(rangeScanner == null);
+            rangeScanner = new RangeTxnScanner();
+        }
 
-            case RECOVER:
-                if (!isToCompleteRangeScan)
-                {
-                    Invariants.require(rangeScanner == null);
-                    rangeScanner = new RangeTxnScanner();
-                }
-
-            case ASYNC:
-            case INCR:
-            case SYNC:
-            {
-                boolean hasPreSetup = commandsForKey != null;
-                for (RoutingKey key : keys)
-                {
-                    if (hasPreSetup && completePresetupExclusive(key, commandsForKey, caches.commandsForKeys())) continue;
-                    setupExclusive(key, AccordTask::ensureCommandsForKey, caches.commandsForKeys());
-                }
-                break;
-            }
+        boolean hasPreSetup = commandsForKey != null;
+        for (RoutingKey key : keys)
+        {
+            if (hasPreSetup && completePresetupExclusive(key, commandsForKey, caches.commandsForKeys())) continue;
+            setupExclusive(key, AccordTask::ensureCommandsForKey, caches.commandsForKeys());
         }
     }
 
     private void setupRangeLoadsExclusive(Caches caches)
     {
-        switch (preLoadContext.keyHistory())
+        if (preLoadContext.loadKeysFor() == WRITE)
+            return;
+
+        switch (preLoadContext.loadKeys())
         {
-            default: throw new AssertionError("Unhandled KeyHistory: " + preLoadContext.keyHistory());
+            default: throw new UnhandledEnum(preLoadContext.loadKeys());
             case NONE:
             case ASYNC:
                 break;
@@ -432,7 +444,6 @@ public abstract class AccordTask<R> extends Task implements Runnable, Function<S
             case INCR:
                 throw new AssertionError("Incremental mode should only be used with an explicit list of keys");
 
-            case RECOVER:
             case SYNC:
                 hasRanges = true;
                 rangeScanner = new RangeTxnAndKeyScanner(caches.commandsForKeys());
@@ -472,11 +483,12 @@ public abstract class AccordTask<R> extends Task implements Runnable, Function<S
         Map<? super K, ? super S> map;
         switch (entryStatus)
         {
-            default: throw new IllegalStateException("Unhandled global state: " + entryStatus);
+            default: throw new UnhandledEnum(entryStatus);
             case WAITING_TO_LOAD:
             case LOADING:
                 map = ensureLoading();
                 break;
+            case WAITING_TO_SAVE:
             case SAVING:
             case LOADED:
             case MODIFIED:
@@ -637,6 +649,7 @@ public abstract class AccordTask<R> extends Task implements Runnable, Function<S
     protected void preRunExclusive()
     {
         state(RUNNING);
+        queued = null;
         if (rangeScanner != null)
         {
             commandsForRanges = rangeScanner.finish(commandStore.cachesExclusive());
@@ -649,20 +662,21 @@ public abstract class AccordTask<R> extends Task implements Runnable, Function<S
     }
 
     @Override
-    public void run()
+    public void runInternal()
     {
-        setLoggingIds();
         logger.trace("Running {} with state {}", this, state);
         AccordSafeCommandStore safeStore = null;
-        try
+        try (Closeable close = locals.get())
         {
+            if (Tracing.isTracing())
+                Tracing.trace(preLoadContext.describe());
+
             if (state != RUNNING)
                 throw illegalState("Unexpected state " + toDescription());
 
             safeStore = commandStore.begin(this, commandsForRanges);
             R result = apply(safeStore);
 
-            // TODO (required): currently, we are not very efficient about ensuring that we persist the absolute minimum amount of state. Improve that.
             List<Journal.CommandUpdate> changes = null;
             if (commands != null)
             {
@@ -709,18 +723,17 @@ public abstract class AccordTask<R> extends Task implements Runnable, Function<S
         finally
         {
             logger.trace("Exiting {}", this);
-            clearLoggingIds();
         }
     }
 
     public void fail(Throwable throwable)
     {
-        commandStore.agent().onUncaughtException(throwable);
+        commandStore.agent().onException(throwable);
         if (state.isComplete())
             return;
 
         if (commandStore.hasSafeStore())
-            commandStore.agent().onUncaughtException(new IllegalStateException(String.format("Failure to cleanup safe store for %s; status=%s", this, state), throwable));
+            commandStore.agent().onException(new IllegalStateException(String.format("Failure to cleanup safe store for %s; status=%s", this, state), throwable));
 
         state(FAILING);
         if (callback != null)
@@ -734,12 +747,12 @@ public abstract class AccordTask<R> extends Task implements Runnable, Function<S
         {
             if (newFailure)
             {
-                commandStore.agent().onUncaughtException(throwable);
+                commandStore.agent().onException(throwable);
                 if (state.isComplete())
                     return;
 
                 if (commandStore.hasSafeStore())
-                    commandStore.agent().onUncaughtException(new IllegalStateException(String.format("Failure to cleanup safe store for %s; status=%s", this, state), throwable));
+                    commandStore.agent().onException(new IllegalStateException(String.format("Failure to cleanup safe store for %s; status=%s", this, state), throwable));
             }
 
             state(FAILED);
@@ -753,9 +766,19 @@ public abstract class AccordTask<R> extends Task implements Runnable, Function<S
 
     protected void cleanupExclusive()
     {
-        releaseResources(commandStore.cachesExclusive());
         if (state == FAILING)
             state(FAILED);
+        Invariants.expect(state.isExecuted());
+        releaseResources(commandStore.cachesExclusive());
+        if (runningAt != 0)
+        {
+            commandStore.executor().elapsedRunning.increment(completedAt - runningAt, completedAt);
+        }
+        if (histogramBuffer != null)
+        {
+            histogramBuffer.flush(completedAt);
+            histogramBuffer = null;
+        }
     }
 
     @Nullable
@@ -777,10 +800,14 @@ public abstract class AccordTask<R> extends Task implements Runnable, Function<S
 
     public void cancelExclusive()
     {
-        releaseResources(commandStore.cachesExclusive());
         state(CANCELLED);
         if (callback != null)
             callback.accept(null, new CancellationException());
+    }
+
+    void cancelExclusive(AccordExecutor owner)
+    {
+        owner.cancelExclusive(this);
     }
 
     public State state()
@@ -833,7 +860,7 @@ public abstract class AccordTask<R> extends Task implements Runnable, Function<S
         catch (Throwable t)
         {
             releaseResourcesSlow(caches, t);
-            throw t;
+            commandStore.agent().onException(t);
         }
     }
 
@@ -952,7 +979,7 @@ public abstract class AccordTask<R> extends Task implements Runnable, Function<S
 
         boolean scanned;
 
-        void runInternal()
+        protected void runInternal()
         {
             for (Range range : ranges)
             {
@@ -974,30 +1001,41 @@ public abstract class AccordTask<R> extends Task implements Runnable, Function<S
                 default: throw new AssertionError("Unhandled Status: " + entry.status());
                 case WAITING_TO_LOAD:
                 case LOADING:
-                    if (scanned)
-                        // if we've finished scanning and not already taken a reference we shouldn't need to witness (unless modified)
-                        return;
-                    ensureLoading().put(entry.key(), commandsForKeyCache.acquire(entry));
-                    if (entry.status() == Status.WAITING_TO_LOAD)
-                        ensureWaitingToLoad().add(entry);
-                    entry.loadingOrWaiting().add(AccordTask.this);
                     return;
 
                 case MODIFIED:
+                case WAITING_TO_SAVE:
                 case SAVING:
                 case LOADED:
                 case FAILED_TO_SAVE:
                     if (commandsForKey != null && commandsForKey.containsKey(entry.key()))
                         return;
+
+                    Object v = entry.getOrShrunkExclusive();
+                    if (v == null) return;
+                    else if (v instanceof CommandsForKey)
+                    {
+                        if (!summaryLoader.isRelevant((CommandsForKey) v))
+                            return;
+                    }
+                    else
+                    {
+                        TxnId last = CommandSerializers.txnId.deserialize((ByteBuffer) v);
+                        int position = (int)CommandSerializers.txnId.serializedSize(last);
+                        TxnId minUndecided = CommandSerializers.txnId.deserialize((ByteBuffer) v, position);
+                        if (!summaryLoader.isRelevant(entry.key(), last, minUndecided))
+                            return;
+                    }
+
                     ensureCommandsForKey().putIfAbsent(entry.key(), commandsForKeyCache.acquire(entry));
             }
         }
 
         void startInternal(Caches caches)
         {
-            for (RoutingKey key : caches.commandsForKeys().keySet())
+            for (Range range : ranges)
             {
-                if (ranges.contains(key))
+                for (RoutingKey key : caches.commandsForKeys().keysBetween(range.start(), range.startInclusive(), range.end(), range.endInclusive()))
                     intersectingKeys.add((TokenKey) key);
             }
             caches.commandsForKeys().register(keyWatcher);
@@ -1027,7 +1065,7 @@ public abstract class AccordTask<R> extends Task implements Runnable, Function<S
         }
     }
 
-    public class RangeTxnScanner implements Runnable
+    public class RangeTxnScanner extends AccordExecutor.AbstractIOTask
     {
         class CommandWatcher implements AccordCache.Listener<TxnId, Command>
         {
@@ -1036,7 +1074,7 @@ public abstract class AccordTask<R> extends Task implements Runnable, Function<S
             {
                 CommandsForRanges.Summary summary = summaryLoader.ifRelevant(state);
                 if (summary != null)
-                    summaries.put(summary.txnId, summary);
+                    summaries.put(summary.plainTxnId(), summary);
             }
         }
 
@@ -1047,23 +1085,9 @@ public abstract class AccordTask<R> extends Task implements Runnable, Function<S
 
         CommandsForRanges.Loader summaryLoader;
         boolean scanned;
+        Throwable failure;
 
-        @Override
-        public void run()
-        {
-            try
-            {
-                runInternal();
-            }
-            catch (Throwable t)
-            {
-                commandStore.executor().onScannedRanges(AccordTask.this, t);
-                throw t;
-            }
-            commandStore.executor().onScannedRanges(AccordTask.this, null);
-        }
-
-        void runInternal()
+        protected void runInternal()
         {
             summaryLoader.intersects(txnId -> {
                 if (summaries.containsKey(txnId))
@@ -1071,22 +1095,37 @@ public abstract class AccordTask<R> extends Task implements Runnable, Function<S
 
                 CommandsForRanges.Summary summary = summaryLoader.load(txnId);
                 if (summary != null)
+                {
                     summaries.putIfAbsent(txnId, summary);
+                    summaryLoader.maybeRecordFutureRx(summary);
+                }
             });
         }
 
-        public void start(BiFunction<Task, Runnable, Cancellable> executor)
+        @Override
+        protected void postRunExclusive()
+        {
+            commandStore.executor().onScannedRangesExclusive(AccordTask.this, failure);
+        }
+
+        @Override
+        protected void fail(Throwable t)
+        {
+            this.failure = t;
+        }
+
+        public void start(AccordExecutor executor)
         {
             Caches caches = commandStore.cachesExclusive();
             state(SCANNING_RANGES);
             startInternal(caches);
-            executor.apply(AccordTask.this, this);
+            executor.submitPlainExclusive(AccordTask.this, this);
         }
 
         void startInternal(Caches caches)
         {
-            summaryLoader = commandStore.diskCommandsForRanges().loader(preLoadContext.primaryTxnId(), preLoadContext.keyHistory(), keysOrRanges);
-            summaryLoader.forEachInCache(summary -> summaries.put(summary.txnId, summary), caches);
+            summaryLoader = commandStore.commandsForRanges().loader(preLoadContext.primaryTxnId(), preLoadContext.loadKeysFor(), keysOrRanges);
+            summaryLoader.forEachInCache(keysOrRanges, summary -> summaries.put(summary.plainTxnId(), summary), caches);
             caches.commands().register(commandWatcher);
         }
 
@@ -1114,6 +1153,41 @@ public abstract class AccordTask<R> extends Task implements Runnable, Function<S
             caches.commands().unregister(commandWatcher);
             return new CommandsForRanges(summaries);
         }
+
+        @Override
+        public String description()
+        {
+            return "Scanning range intersections for " + AccordTask.this;
+        }
+
+        @Override
+        public String toString()
+        {
+            return description();
+        }
     }
 
+    @Override
+    public DebuggableTask debuggable()
+    {
+        return this;
+    }
+
+    @Override
+    public long creationTimeNanos()
+    {
+        return createdAt;
+    }
+
+    @Override
+    public long startTimeNanos()
+    {
+        return runningAt;
+    }
+
+    @Override
+    public String description()
+    {
+        return preLoadContext.describe();
+    }
 }

@@ -20,6 +20,7 @@ package org.apache.cassandra.service.accord.api;
 
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.function.BiConsumer;
 
 import javax.annotation.Nullable;
@@ -29,10 +30,14 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import accord.api.Agent;
-import accord.api.EventListener;
+import accord.api.CoordinatorEventListener;
+import accord.api.OwnershipEventListener;
+import accord.api.ReplicaEventListener;
 import accord.api.ProgressLog.BlockedUntil;
-import accord.api.Result;
 import accord.api.RoutingKey;
+import accord.api.Tracing;
+import accord.coordinate.Coordination;
+import accord.coordinate.Timeout;
 import accord.local.Command;
 import accord.local.Node;
 import accord.local.SafeCommand;
@@ -57,23 +62,27 @@ import accord.utils.SortedList;
 import accord.utils.UnhandledEnum;
 import accord.utils.async.AsyncChain;
 import accord.utils.async.AsyncChains;
-import accord.utils.async.AsyncResult;
-import accord.utils.async.AsyncResults;
+import accord.utils.async.Cancellable;
 import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.db.SystemKeyspace;
 import org.apache.cassandra.exceptions.RequestTimeoutException;
-import org.apache.cassandra.metrics.AccordMetrics;
+import org.apache.cassandra.metrics.AccordReplicaMetrics;
 import org.apache.cassandra.net.ResponseContext;
+import org.apache.cassandra.service.RetryStrategy;
 import org.apache.cassandra.service.accord.AccordService;
+import org.apache.cassandra.service.accord.AccordTracing;
 import org.apache.cassandra.service.accord.serializers.TableMetadatasAndKeys;
 import org.apache.cassandra.service.accord.txn.TxnQuery;
 import org.apache.cassandra.service.accord.txn.TxnRead;
 import org.apache.cassandra.utils.Clock;
 import org.apache.cassandra.utils.JVMStabilityInspector;
+import org.apache.cassandra.utils.NoSpamLogger;
 
 import static accord.primitives.Routable.Domain.Key;
 import static accord.utils.SortedArrays.SortedArrayList.ofSorted;
 import static java.util.concurrent.TimeUnit.MICROSECONDS;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
+import static java.util.concurrent.TimeUnit.MINUTES;
 import static java.util.concurrent.TimeUnit.NANOSECONDS;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.apache.cassandra.config.DatabaseDescriptor.getAccordScheduleDurabilityTxnIdLag;
@@ -83,15 +92,19 @@ import static org.apache.cassandra.service.accord.api.AccordWaitStrategies.fetch
 import static org.apache.cassandra.service.accord.api.AccordWaitStrategies.recover;
 import static org.apache.cassandra.service.accord.api.AccordWaitStrategies.retryBootstrap;
 import static org.apache.cassandra.service.accord.api.AccordWaitStrategies.retryDurability;
+import static org.apache.cassandra.service.accord.api.AccordWaitStrategies.retryFetchTopology;
+import static org.apache.cassandra.service.accord.api.AccordWaitStrategies.retryJoinBootstrap;
 import static org.apache.cassandra.service.accord.api.AccordWaitStrategies.retrySyncPoint;
 import static org.apache.cassandra.service.accord.api.AccordWaitStrategies.slowTxnPreaccept;
 import static org.apache.cassandra.service.accord.api.AccordWaitStrategies.slowRead;
 import static org.apache.cassandra.utils.Clock.Global.nanoTime;
 
 // TODO (expected): merge with AccordService
-public class AccordAgent implements Agent
+public class AccordAgent implements Agent, OwnershipEventListener
 {
     private static final Logger logger = LoggerFactory.getLogger(AccordAgent.class);
+    private static final NoSpamLogger noSpamLogger = NoSpamLogger.getLogger(logger, 1L, MINUTES);
+    private static final ReplicaEventListener replicaEventListener = new AccordReplicaMetrics.Listener();
 
     private static BiConsumer<TxnId, Throwable> onFailedBarrier;
     public static void setOnFailedBarrier(BiConsumer<TxnId, Throwable> newOnFailedBarrier) { onFailedBarrier = newOnFailedBarrier; }
@@ -101,12 +114,29 @@ public class AccordAgent implements Agent
         if (invoke != null) invoke.accept(txnId, cause);
     }
 
-
+    private final AccordTracing tracing = new AccordTracing();
     private final RandomSource random = new DefaultRandom();
     protected Node.Id self;
 
     public AccordAgent()
     {
+    }
+
+    public AccordTracing tracing()
+    {
+        return tracing;
+    }
+
+    @Override
+    public @Nullable Tracing trace(TxnId txnId, Participants<?> participants, Coordination.CoordinationKind eventType)
+    {
+        return tracing.trace(txnId, participants, eventType);
+    }
+
+    @Override
+    public OwnershipEventListener ownershipEvents()
+    {
+        return this;
     }
 
     public void setNodeId(Node.Id id)
@@ -115,24 +145,48 @@ public class AccordAgent implements Agent
     }
 
     @Override
-    public void onRecover(Node node, Result success, Throwable fail)
+    public void onFailedBootstrap(int attempts, String phase, Ranges ranges, Runnable retry, Runnable fail, Throwable failure)
     {
-    }
-
-    @Override
-    public void onInconsistentTimestamp(Command command, Timestamp prev, Timestamp next)
-    {
-        // TODO (expected): better reporting
-        AssertionError error = new AssertionError("Inconsistent execution timestamp detected for txnId " + command.txnId() + ": " + prev + " != " + next);
-        onUncaughtException(error);
-        throw error;
-    }
-
-    @Override
-    public void onFailedBootstrap(int attempts, String phase, Ranges ranges, Runnable retry, Throwable failure)
-    {
-        logger.error("Failed bootstrap at {} for {}", phase, ranges, failure);
-        AccordService.instance().scheduler().once(retry, retryBootstrap.computeWait(attempts, MICROSECONDS), MICROSECONDS);
+        RetryStrategy strategy;
+        String message;
+        SystemKeyspace.BootstrapState bootstrapState = SystemKeyspace.getBootstrapState();
+        switch (bootstrapState)
+        {
+            default: throw new UnhandledEnum(bootstrapState);
+            case IN_PROGRESS:
+            case NEEDS_BOOTSTRAP:
+                message = "Failed bootstrap (for joining) at {} for {}{}";
+                strategy = retryJoinBootstrap;
+                break;
+            case COMPLETED:
+            case DECOMMISSIONED:
+                message = "Failed bootstrap at {} for {}{}";
+                strategy = retryBootstrap;
+                break;
+        }
+        long retryDelayMicros = strategy.computeWait(attempts, MICROSECONDS);
+        if (retryDelayMicros < 0)
+        {
+            if (strategy == retryJoinBootstrap)
+            {
+                logger.error(message, phase, ranges, ". Retry strategy giving up. Not yet joined, so failing bootstrap.", failure);
+                fail.run();
+            }
+            else
+            {
+                // TODO (expected): we should be able to resume these without restarting (but for now we just shouldn't configure a retry limit)
+                // failing would prevent the node processing all epochs (as this feeds into the epoch readiness), so we just drop in this case
+                logger.error(message, phase, ranges, ". Retry strategy giving up. To resume you will need to restart.", failure);
+            }
+        }
+        else
+        {
+            logger.error(message, phase, ranges, ". Retrying in " + retryDelayMicros + "us.", failure);
+            AccordService.instance().scheduler().once(() -> {
+                logger.info("Retrying bootstrap of {}", ranges);
+                retry.run();
+            }, retryDelayMicros, MICROSECONDS);
+        }
     }
 
     @Override
@@ -141,20 +195,23 @@ public class AccordAgent implements Agent
         logger.error("This replica has become stale for {} as of {}", ranges, staleSince);
     }
 
-    @Override
-    public void onUncaughtException(Throwable t)
+    public static void handleException(Throwable t)
     {
-        if (t instanceof RequestTimeoutException || t instanceof CancellationException)
+        if (t instanceof RequestTimeoutException || t instanceof CancellationException || t instanceof TimeoutException || t instanceof Timeout)
             return;
-        logger.error("Uncaught accord exception", t);
         JVMStabilityInspector.uncaughtException(Thread.currentThread(), t);
     }
 
     @Override
-    public void onCaughtException(Throwable t, String context)
+    public void onException(Throwable t)
     {
-        logger.warn(context, t);
-        JVMStabilityInspector.uncaughtException(Thread.currentThread(), t);
+        handleException(t);
+    }
+
+    @Override
+    public void onException(Throwable t, String context)
+    {
+        handleException(t);
     }
 
     @Override
@@ -192,10 +249,11 @@ public class AccordAgent implements Agent
         return SECONDS.toMicros(1);
     }
 
+    // TODO (expected): I don't think we even need this - just prune each time we have doubled in size
     @Override
     public long maxConflictsPruneInterval()
     {
-        return 100;
+        return 1024;
     }
 
     /**
@@ -209,13 +267,22 @@ public class AccordAgent implements Agent
     }
 
     @Override
-    public EventListener eventListener()
+    public CoordinatorEventListener coordinatorEvents()
     {
-        return AccordMetrics.Listener.instance;
+        return tracing;
     }
 
     @Override
-    public long slowCoordinatorDelay(Node node, SafeCommandStore safeStore, TxnId txnId, TimeUnit units, int retryCount)
+    public ReplicaEventListener replicaEvents()
+    {
+        return replicaEventListener;
+    }
+
+    private static final long ONE_SECOND = SECONDS.toMicros(1L);
+    private static final long ONE_MINUTE = MINUTES.toMicros(1L);
+
+    @Override
+    public long slowCoordinatorDelay(Node node, SafeCommandStore safeStore, TxnId txnId, TimeUnit units, int attempt)
     {
         SafeCommand safeCommand = safeStore.unsafeGetNoCleanup(txnId);
         Invariants.nonNull(safeCommand);
@@ -223,19 +290,46 @@ public class AccordAgent implements Agent
         Command command = safeCommand.current();
         Invariants.nonNull(command);
 
-        Timestamp mostRecentAttempt = Timestamp.max(command.txnId(), command.promised());
-        RoutingKey homeKey = command.route().homeKey();
-        Shard shard = node.topology().forEpochIfKnown(homeKey, command.txnId().epoch());
-
         // TODO (expected): make this a configurable calculation on normal request latencies (like ContentionStrategy)
-        long oneSecond = SECONDS.toMicros(1L);
-        long startTime = mostRecentAttempt.hlc() + recover(txnId).computeWait(retryCount, MICROSECONDS);
-
-        startTime = nonClashingStartTime(startTime, shard == null ? null : shard.nodes, node.id(), oneSecond, random);
         long nowMicros = MILLISECONDS.toMicros(Clock.Global.currentTimeMillis());
+        long mostRecentStart = mostRecentStart(command, nowMicros);
+        long waitMicros = recover(txnId).computeWait(attempt, MICROSECONDS);
+        long startTime = mostRecentStart + waitMicros;
+        if (startTime < nowMicros)
+        {
+            // TODO (expected): support no waiting here
+            if (attempt == 1)
+                return 1;
+
+            startTime = nowMicros + waitMicros/2;
+        }
+
+        RoutingKey homeKey = command.route().homeKey();
+        Shard shard = node.topology().active().forEpochIfKnown(homeKey, command.txnId().epoch());
+
+        startTime = nonClashingStartTime(startTime, shard == null ? null : shard.nodes, node.id(), ONE_SECOND, random);
         long delayMicros = Math.max(1, startTime - nowMicros);
-        Invariants.require(delayMicros < TimeUnit.HOURS.toMicros(1L));
+        Invariants.require(delayMicros < TimeUnit.HOURS.toMicros(1L), "unexpectedly long coordination recovery delay proposed: %d (start %d, now %d)", delayMicros, startTime, nowMicros, command.txnId(), command.promised());
         return units.convert(delayMicros, MICROSECONDS);
+    }
+
+    private static long mostRecentStart(Command command, long nowMicros)
+    {
+        // TODO (expected): make this a configurable calculation on normal request latencies (like ContentionStrategy)
+        long promisedHlc = command.promised().hlc();
+        if (promisedHlc > nowMicros + ONE_MINUTE)
+            promisedHlc = 0;
+        long result = Math.max(command.txnId().hlc(), promisedHlc);
+        if (result > nowMicros + ONE_SECOND)
+            noSpamLogger.warn("max({},{})>{}", command.txnId(), command.promised(), nowMicros);
+        return result;
+    }
+
+    @Override
+    public boolean isSlowCoordinator(long elapsed, TimeUnit units, TxnId txnId, int attempt)
+    {
+        long maxWait = recover(txnId).computeMaxWait(attempt, units);
+        return elapsed >= maxWait;
     }
 
     @VisibleForTesting
@@ -264,7 +358,18 @@ public class AccordAgent implements Agent
     @Override
     public long slowReplicaDelay(Node node, SafeCommandStore safeStore, TxnId txnId, int attempt, BlockedUntil blockedUntil, TimeUnit units)
     {
-        return fetch(txnId).computeWait(attempt, units);
+        Command command = Invariants.nonNull(safeStore.unsafeGetNoCleanup(txnId).current());
+        long nowMicros = MILLISECONDS.toMicros(Clock.Global.currentTimeMillis());
+        long mostRecentStart = mostRecentStart(command, nowMicros);
+        long waitMicros = fetch(txnId).computeWait(attempt, units);
+        long startTime = mostRecentStart + waitMicros;
+        if (startTime < nowMicros)
+        {
+            // TODO (expected): support no waiting here
+            if (attempt == 1) return 1;
+            else return waitMicros/2;
+        }
+        return waitMicros;
     }
 
     @Override
@@ -278,6 +383,12 @@ public class AccordAgent implements Agent
     public long retrySyncPointDelay(Node node, int attempt, TimeUnit units)
     {
         return retrySyncPoint.computeWait(attempt, units);
+    }
+
+    @Override
+    public long retryTopologyDelay(Node node, int attempt, TimeUnit units)
+    {
+        return retryFetchTopology.computeWait(attempt, units);
     }
 
     @Override
@@ -337,20 +448,20 @@ public class AccordAgent implements Agent
             return AsyncChains.success(staleId);
 
         logger.debug("Waiting {} micros for {} to be stale", waitMicros, staleId);
-        AsyncResult.Settable<TxnId> result = AsyncResults.settable();
-        node.scheduler().selfRecurring(() -> result.setSuccess(staleId), waitMicros, MICROSECONDS);
-        return result;
+        return new AsyncChains.Head<>()
+        {
+            @Override
+            protected @Nullable Cancellable start(BiConsumer<? super TxnId, Throwable> callback)
+            {
+                node.scheduler().once(() -> callback.accept(staleId, null), waitMicros, MICROSECONDS);
+                return null;
+            }
+        };
     }
 
     @Override
     public long minStaleHlc(Node node, boolean requested)
     {
         return node.now() - (100 + getAccordScheduleDurabilityTxnIdLag(MICROSECONDS));
-    }
-
-    @Override
-    public void onViolation(String message, Participants<?> participants, @Nullable TxnId notWitnessed, @Nullable Timestamp notWitnessedExecuteAt, @Nullable TxnId by, @Nullable Timestamp byEexecuteAt)
-    {
-        logger.error(message);
     }
 }

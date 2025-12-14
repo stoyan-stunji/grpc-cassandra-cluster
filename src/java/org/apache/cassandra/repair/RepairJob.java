@@ -39,7 +39,7 @@ import com.google.common.util.concurrent.FutureCallback;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import accord.primitives.Ranges;
+import accord.local.durability.DurabilityService.SyncRemote;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Keyspace;
@@ -53,9 +53,12 @@ import org.apache.cassandra.repair.asymmetric.ReduceHelper;
 import org.apache.cassandra.repair.state.JobState;
 import org.apache.cassandra.schema.SystemDistributedKeyspace;
 import org.apache.cassandra.schema.TableMetadata;
+import org.apache.cassandra.service.accord.IAccordService;
 import org.apache.cassandra.service.accord.repair.AccordRepair;
+import org.apache.cassandra.service.accord.repair.AccordRepair.AccordRepairResult;
 import org.apache.cassandra.service.consensus.migration.ConsensusMigrationRepairResult;
 import org.apache.cassandra.service.paxos.cleanup.PaxosCleanup;
+import org.apache.cassandra.service.paxos.cleanup.PaxosUpdateLowBallot;
 import org.apache.cassandra.streaming.PreviewKind;
 import org.apache.cassandra.tcm.ClusterMetadata;
 import org.apache.cassandra.tcm.Epoch;
@@ -68,6 +71,9 @@ import org.apache.cassandra.utils.concurrent.Future;
 import org.apache.cassandra.utils.concurrent.FutureCombiner;
 import org.apache.cassandra.utils.concurrent.ImmediateFuture;
 
+import static accord.local.durability.DurabilityService.SyncRemote.All;
+import static accord.local.durability.DurabilityService.SyncRemote.NoRemote;
+import static accord.local.durability.DurabilityService.SyncRemote.Quorum;
 import static com.google.common.util.concurrent.Futures.getUnchecked;
 import static org.apache.cassandra.config.DatabaseDescriptor.paxosRepairEnabled;
 import static org.apache.cassandra.schema.SchemaConstants.METADATA_KEYSPACE_NAME;
@@ -173,25 +179,32 @@ public class RepairJob extends AsyncFuture<RepairResult> implements Runnable
             paxosRepair = ImmediateFuture.success(null);
         }
 
-        Future<Ranges> accordRepair;
+        Future<AccordRepairResult> accordRepair;
         if (doAccordRepair)
         {
             accordRepair = paxosRepair.flatMap(unused -> {
-                boolean requireAllEndpoints;
-                // If the session excluded dead nodes it's not eligible for migration and is not supposed to occur at ALL anyways
-                if (session.excludedDeadNodes)
-                    requireAllEndpoints = false;
+                SyncRemote sync;
+                    // If the session is doing a data repair (which flushes sstables if not incremental) we can do the barriers at QUORUM
+                if (session.excludedDeadNodes || !session.allReplicas || (session.repairData && !session.isIncremental))
+                {
+                    sync = session.permitNoQuorum ? NoRemote : Quorum;
+                }
                 else
                 {
-                    // If the session is doing a data repair (which flushes sstables if not incremental) we can do the barriers at QUORUM
-                    if (session.repairData && !session.isIncremental)
-                        requireAllEndpoints = false;
-                    else
-                        requireAllEndpoints = true;
+                    sync = All;
                 }
-                logger.info("{} {}.{} starting accord repair, require all endpoints {}", session.previewKind.logPrefix(session.getId()), desc.keyspace, desc.columnFamily, requireAllEndpoints);
-                AccordRepair repair = new AccordRepair(ctx, cfs, desc.sessionId, desc.keyspace, desc.ranges, requireAllEndpoints, allEndpoints);
-                return repair.repair(taskExecutor);
+                logger.info("{} {}.{} starting accord repair, sync {}", session.previewKind.logPrefix(session.getId()), desc.keyspace, desc.columnFamily, sync);
+                AccordRepair repair = new AccordRepair(ctx, cfs, desc.sessionId, desc.keyspace, desc.ranges, sync, sync == All ? null : allEndpoints);
+                return repair.repair(taskExecutor).flatMap(accordRepairResult -> {
+                    // Propagate the HLC discovered during Accord repair to Paxos so Paxos doesn't use ballots < Accord has already used
+                    if (accordRepairResult.maxHlc != IAccordService.NO_HLC)
+                    {
+                        PaxosUpdateLowBallot paxosLowBallot = new PaxosUpdateLowBallot(ctx, allEndpoints, accordRepairResult.maxHlc);
+                        paxosLowBallot.start();
+                        return paxosLowBallot.map(ignored -> accordRepairResult);
+                    }
+                    return ImmediateFuture.success(accordRepairResult);
+                }, taskExecutor);
             }, taskExecutor);
         }
         else
@@ -266,7 +279,7 @@ public class RepairJob extends AsyncFuture<RepairResult> implements Runnable
                 }
                 cfs.metric.repairsCompleted.inc();
                 logger.info("Completing repair with excludedDeadNodes {}", session.excludedDeadNodes);
-                ConsensusMigrationRepairResult cmrs = ConsensusMigrationRepairResult.fromRepair(repairStartingEpoch, getUnchecked(accordRepair), session.repairData, doPaxosRepair, doAccordRepair, session.excludedDeadNodes);
+                ConsensusMigrationRepairResult cmrs = ConsensusMigrationRepairResult.fromRepair(repairStartingEpoch, getUnchecked(accordRepair), session.repairData, doPaxosRepair, doAccordRepair, session.excludedDeadNodes, session.isIncremental);
                 trySuccess(new RepairResult(desc, stats, cmrs));
             }
 
@@ -293,7 +306,7 @@ public class RepairJob extends AsyncFuture<RepairResult> implements Runnable
         }, taskExecutor);
     }
 
-    private Future<List<SyncTask>> createSyncTasks(Future<Ranges> accordRepair, Future<?> allSnapshotTasks, List<InetAddressAndPort> allEndpoints)
+    private Future<List<SyncTask>> createSyncTasks(Future<AccordRepairResult> accordRepair, Future<?> allSnapshotTasks, List<InetAddressAndPort> allEndpoints)
     {
         Future<List<TreeResponse>> treeResponses;
         if (allSnapshotTasks != null)

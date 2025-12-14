@@ -41,7 +41,7 @@ public class TokenRange extends Range.EndInclusive
     public static final long EMPTY_SIZE = ObjectSizes.measure(new TokenRange(TokenKey.min(TableId.fromLong(0), Murmur3Partitioner.instance), TokenKey.max(TableId.fromLong(0), Murmur3Partitioner.instance)));
 
     // Don't make this public use create or createUnsafe
-    private TokenRange(TokenKey start, TokenKey end)
+    protected TokenRange(TokenKey start, TokenKey end)
     {
         super(start, end);
     }
@@ -54,24 +54,29 @@ public class TokenRange extends Range.EndInclusive
         return new TokenRange(start, end);
     }
 
+    public static TokenRange create(TableId tableId, Token start, Token end)
+    {
+        return new TokenRange(new TokenKey(tableId, start), new TokenKey(tableId, end));
+    }
+
     public static TokenRange createUnsafe(TokenKey start, TokenKey end)
     {
         return new TokenRange(start, end);
     }
 
-    public TableId table()
+    public final TableId table()
     {
         return start().table();
     }
 
     @Override
-    public TokenKey start()
+    public final TokenKey start()
     {
         return (TokenKey) super.start();
     }
 
     @Override
-    public TokenKey end()
+    public final TokenKey end()
     {
         return  (TokenKey) super.end();
     }
@@ -87,7 +92,7 @@ public class TokenRange extends Range.EndInclusive
     }
 
     @VisibleForTesting
-    public Range withTable(TableId table)
+    public TokenRange withTable(TableId table)
     {
         return new TokenRange(start().withTable(table), end().withTable(table));
     }
@@ -148,5 +153,46 @@ public class TokenRange extends Range.EndInclusive
             return TokenKey.serializer.serializedSize(range.start())
                    + TokenKey.serializer.serializedSize(range.end());
         }
+    }
+
+    public static final UnversionedSerializer<TokenRange> noTableSerializer = new UnversionedSerializer<TokenRange>()
+    {
+        @Override
+        public void serialize(TokenRange t, DataOutputPlus out) throws IOException
+        {
+            TokenKey.noTableSerializer.serialize(t.start(), out);
+            TokenKey.noTableSerializer.serialize(t.end(), out);
+        }
+
+        @Override
+        public TokenRange deserialize(DataInputPlus in) throws IOException
+        {
+            return TokenRange.create(TokenKey.noTableSerializer.deserialize(TableId.UNDEFINED, in),
+                                     TokenKey.noTableSerializer.deserialize(TableId.UNDEFINED, in));
+        }
+
+        @Override
+        public long serializedSize(TokenRange t)
+        {
+            return TokenKey.noTableSerializer.serializedSize(t.start())
+                   + TokenKey.noTableSerializer.serializedSize(t.end());
+        }
     };
+
+    public static TokenRange parse(String str, IPartitioner partitioner)
+    {
+        TableId tableId;
+        {
+            int split = str.indexOf(':', str.startsWith("tid:") ? 4 : 0);
+            tableId = TableId.fromString(str.substring(0, split));
+            str = str.substring(split + 2, str.length() - 1);
+        }
+
+        String[] bounds = str.split(",");
+        if (bounds.length != 2)
+            throw new IllegalArgumentException("Invalid TokenRange: " + str);
+
+        return new TokenRange(TokenKey.parse(tableId, bounds[0], partitioner), TokenKey.parse(tableId, bounds[1], partitioner));
+    }
+
 }

@@ -756,18 +756,6 @@ public abstract class CoordinatorPathTestBase extends FuzzTestBase
                                                log.append(logState);
                                                return log.waitForHighestConsecutive();
                                            }
-
-                                           @Override
-                                           public LogState getLocalState(Epoch start, Epoch end, boolean includeSnapshot)
-                                           {
-                                               return log.getLocalEntries(start, end, includeSnapshot);
-                                           }
-
-                                           @Override
-                                           public LogState getLogState(Epoch start, Epoch end, boolean includeSnapshot, Retry retryPolicy)
-                                           {
-                                               return getLocalState(start, end, includeSnapshot);
-                                           }
                                        },
                                        (a,b) -> {},
                                        false);
@@ -843,7 +831,7 @@ public abstract class CoordinatorPathTestBase extends FuzzTestBase
             return nodes.values().stream().filter(predicate);
         }
 
-        public void waitForQuiescense()
+        public void waitForQuiescence()
         {
             Epoch waitFor = ClusterMetadataService.instance().log().waitForHighestConsecutive().epoch;
             realCluster.get(1).acceptsOnInstance((Long epoch) -> {

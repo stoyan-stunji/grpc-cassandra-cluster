@@ -19,33 +19,35 @@
 package org.apache.cassandra.service.accord;
 
 import java.util.Collection;
-import java.util.Collections;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.BiConsumer;
+import java.util.function.Function;
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 
+import accord.utils.async.AsyncResult;
+import org.apache.cassandra.tcm.ClusterMetadata;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import accord.api.Agent;
-import accord.local.durability.DurabilityService.SyncLocal;
-import accord.local.durability.DurabilityService.SyncRemote;
 import accord.local.CommandStores.RangesForEpoch;
 import accord.local.DurableBefore;
 import accord.local.Node;
 import accord.local.Node.Id;
 import accord.local.RedundantBefore;
+import accord.local.durability.DurabilityService.SyncLocal;
+import accord.local.durability.DurabilityService.SyncRemote;
 import accord.messages.Reply;
 import accord.messages.Request;
 import accord.primitives.Keys;
 import accord.primitives.Ranges;
 import accord.primitives.Timestamp;
 import accord.primitives.Txn;
-import accord.primitives.TxnId;
+import accord.topology.EpochReady;
 import accord.topology.TopologyManager;
 import accord.utils.Invariants;
 import accord.utils.async.AsyncChain;
@@ -74,16 +76,28 @@ public interface IAccordService
 
     EnumSet<ConsistencyLevel> SUPPORTED_COMMIT_CONSISTENCY_LEVELS = EnumSet.of(ConsistencyLevel.ANY, ConsistencyLevel.ONE, ConsistencyLevel.QUORUM, ConsistencyLevel.SERIAL, ConsistencyLevel.ALL);
     EnumSet<ConsistencyLevel> SUPPORTED_READ_CONSISTENCY_LEVELS = EnumSet.of(ConsistencyLevel.ONE, ConsistencyLevel.QUORUM, ConsistencyLevel.SERIAL, ConsistencyLevel.ALL);
+    long NO_HLC = Long.MIN_VALUE;
 
     IVerbHandler<? extends Request> requestHandler();
     IVerbHandler<? extends Reply> responseHandler();
 
-    AsyncChain<Void> sync(Object requestedBy, @Nullable Timestamp minBound, Ranges ranges, @Nullable Collection<Id> include, SyncLocal syncLocal, SyncRemote syncRemote);
+    AsyncResult<Void> sync(Object requestedBy, @Nullable Timestamp minBound, Ranges ranges, @Nullable Collection<Id> include, SyncLocal syncLocal, SyncRemote syncRemote, long timeout, TimeUnit timeoutUnits);
     AsyncChain<Void> sync(@Nullable Timestamp minBound, Keys keys, SyncLocal syncLocal, SyncRemote syncRemote);
     AsyncChain<Timestamp> maxConflict(Ranges ranges);
 
-    @Nonnull IAccordResult<TxnResult> coordinateAsync(long minEpoch, @Nonnull Txn txn, @Nonnull ConsistencyLevel consistencyLevel, RequestTime requestTime);
-    @Nonnull TxnResult coordinate(long minEpoch, @Nonnull Txn txn, @Nonnull ConsistencyLevel consistencyLevel, RequestTime requestTime) throws RequestExecutionException;
+    @Nonnull
+    default IAccordResult<TxnResult> coordinateAsync(long minEpoch, @Nonnull Txn txn, @Nonnull ConsistencyLevel consistencyLevel, RequestTime requestTime)
+    {
+        return coordinateAsync(minEpoch, IAccordService.NO_HLC, txn, consistencyLevel, requestTime);
+    }
+    @Nonnull IAccordResult<TxnResult> coordinateAsync(long minEpoch, long minHlc, @Nonnull Txn txn, @Nonnull ConsistencyLevel consistencyLevel, RequestTime requestTime);
+    @Nonnull default TxnResult coordinate(long minEpoch, @Nonnull Txn txn, @Nonnull ConsistencyLevel consistencyLevel, RequestTime requestTime)
+    {
+        return coordinate(minEpoch, txn, consistencyLevel, requestTime, NO_HLC);
+    }
+    @Nonnull TxnResult coordinate(long minEpoch, @Nonnull Txn txn, @Nonnull ConsistencyLevel consistencyLevel, RequestTime requestTime, long minHlc) throws RequestExecutionException;
+
+    List<AccordExecutor> executors();
 
     interface IAccordResult<V>
     {
@@ -93,6 +107,8 @@ public interface IAccordService
         IAccordResult<V> addCallback(BiConsumer<? super V, Throwable> callback);
     }
 
+    boolean isEnabled();
+
     long currentEpoch();
 
     void setCacheSize(long kb);
@@ -100,8 +116,10 @@ public interface IAccordService
 
     TopologyManager topology();
 
-    void startup();
+    void localStartup();
 
+    Future<Void> flushCaches();
+    void markShuttingDown();
     void shutdownAndWait(long timeout, TimeUnit unit) throws InterruptedException, TimeoutException;
 
     AccordScheduler scheduler();
@@ -110,7 +128,8 @@ public interface IAccordService
      * Return a future that will complete once the accord has completed it's local bootstrap process
      * for any ranges gained in the given epoch
      */
-    Future<Void> epochReady(Epoch epoch);
+    Future<Void> epochReady(Epoch epoch, Function<EpochReady, AsyncResult<Void>> f);
+    Future<Void> epochReadyFor(ClusterMetadata epoch, Function<EpochReady, AsyncResult<Void>> f);
 
     void receive(Message<AccordSyncPropagator.Notification> message);
 
@@ -158,19 +177,22 @@ public interface IAccordService
 
     Id nodeId();
 
-    List<CommandStoreTxnBlockedGraph> debugTxnBlockedGraph(TxnId txnId);
-    @Nullable
-    Long minEpoch();
+    long minEpoch();
 
     void awaitDone(TableId id, long epoch);
 
-    AccordConfigurationService configService();
+    AccordEndpointMapper endpointMapper();
+
+    AccordTopologyService topologyService();
 
     Params journalConfiguration();
 
-    boolean shouldAcceptMessages();
-
     Node node();
+
+    /**
+     * Ensure Accord's hlc is at least larger than this for anything accepted at this node
+     */
+    void ensureMinHlc(long minHlc);
 
     // Implementation for the NO_OP service that also has what used to be the default implementations
     // that had to be overridden by the real AccordService anyways
@@ -191,7 +213,7 @@ public interface IAccordService
         }
 
         @Override
-        public AsyncChain<Void> sync(Object requestedBy, @Nullable Timestamp onOrAfter, Ranges ranges, @Nullable Collection<Id> include, SyncLocal syncLocal, SyncRemote syncRemote)
+        public AsyncResult<Void> sync(Object requestedBy, @Nullable Timestamp onOrAfter, Ranges ranges, @Nullable Collection<Id> include, SyncLocal syncLocal, SyncRemote syncRemote, long timeout, TimeUnit timeoutUnits)
         {
             throw new UnsupportedOperationException("No accord transaction should be executed when accord.enabled = false in cassandra.yaml");
         }
@@ -209,15 +231,27 @@ public interface IAccordService
         }
 
         @Override
-        public @Nonnull TxnResult coordinate(long minEpoch, @Nonnull Txn txn, @Nonnull ConsistencyLevel consistencyLevel, @Nonnull RequestTime requestTime)
+        public @Nonnull TxnResult coordinate(long minEpoch, @Nonnull Txn txn, @Nonnull ConsistencyLevel consistencyLevel, @Nonnull RequestTime requestTime, long minHlc)
         {
             throw new UnsupportedOperationException("No accord transaction should be executed when accord.enabled = false in cassandra.yaml");
         }
 
         @Override
-        public @Nonnull IAccordResult<TxnResult> coordinateAsync(long minEpoch, @Nonnull Txn txn, @Nonnull ConsistencyLevel consistencyLevel, RequestTime requestTime)
+        public List<AccordExecutor> executors()
+        {
+            return List.of();
+        }
+
+        @Override
+        public @Nonnull IAccordResult<TxnResult> coordinateAsync(long minEpoch, long minHlc, @Nonnull Txn txn, @Nonnull ConsistencyLevel consistencyLevel, RequestTime requestTime)
         {
             throw new UnsupportedOperationException("No accord transaction should be executed when accord.enabled = false in cassandra.yaml");
+        }
+
+        @Override
+        public boolean isEnabled()
+        {
+            return false;
         }
 
         @Override
@@ -239,7 +273,7 @@ public interface IAccordService
         }
 
         @Override
-        public void startup()
+        public void localStartup()
         {
             try
             {
@@ -252,6 +286,17 @@ public interface IAccordService
         }
 
         @Override
+        public void markShuttingDown()
+        {
+        }
+
+        @Override
+        public Future<Void> flushCaches()
+        {
+            return ImmediateFuture.success(null);
+        }
+
+        @Override
         public void shutdownAndWait(long timeout, TimeUnit unit) { }
 
         @Override
@@ -261,7 +306,13 @@ public interface IAccordService
         }
 
         @Override
-        public Future<Void> epochReady(Epoch epoch)
+        public Future<Void> epochReady(Epoch epoch, Function<EpochReady, AsyncResult<Void>> get)
+        {
+            return BOOTSTRAP_SUCCESS;
+        }
+
+        @Override
+        public Future<Void> epochReadyFor(ClusterMetadata epoch, Function<EpochReady, AsyncResult<Void>> get)
         {
             return BOOTSTRAP_SUCCESS;
         }
@@ -288,16 +339,9 @@ public interface IAccordService
         }
 
         @Override
-        public List<CommandStoreTxnBlockedGraph> debugTxnBlockedGraph(TxnId txnId)
+        public long minEpoch()
         {
-            return Collections.emptyList();
-        }
-
-        @Nullable
-        @Override
-        public Long minEpoch()
-        {
-            return null;
+            return -1;
         }
 
         @Override
@@ -307,9 +351,15 @@ public interface IAccordService
         }
 
         @Override
-        public AccordConfigurationService configService()
+        public AccordEndpointMapper endpointMapper()
         {
-            return null;
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public AccordTopologyService topologyService()
+        {
+            throw new UnsupportedOperationException();
         }
 
         @Override
@@ -319,21 +369,21 @@ public interface IAccordService
         }
 
         @Override
-        public boolean shouldAcceptMessages()
-        {
-            return true;
-        }
-
-        @Override
         public Node node()
         {
             return null;
+        }
+
+        @Override
+        public void ensureMinHlc(long minHlc)
+        {
+
         }
     }
 
     class DelegatingAccordService implements IAccordService
     {
-        protected final IAccordService delegate;
+        protected IAccordService delegate;
 
         public DelegatingAccordService(IAccordService delegate)
         {
@@ -353,9 +403,9 @@ public interface IAccordService
         }
 
         @Override
-        public AsyncChain<Void> sync(Object requestedBy, @Nullable Timestamp onOrAfter, Ranges ranges, @Nullable Collection<Id> include, SyncLocal syncLocal, SyncRemote syncRemote)
+        public AsyncResult<Void> sync(Object requestedBy, @Nullable Timestamp onOrAfter, Ranges ranges, @Nullable Collection<Id> include, SyncLocal syncLocal, SyncRemote syncRemote, long timeout, TimeUnit timeoutUnits)
         {
-            return delegate.sync(requestedBy, onOrAfter, ranges, include, syncLocal, syncRemote);
+            return delegate.sync(requestedBy, onOrAfter, ranges, include, syncLocal, syncRemote, timeout, timeoutUnits);
         }
 
         @Override
@@ -371,23 +421,41 @@ public interface IAccordService
         }
 
         @Override
-        public AccordConfigurationService configService()
+        public AccordEndpointMapper endpointMapper()
         {
-            return delegate.configService();
+            return delegate.endpointMapper();
+        }
+
+        @Override
+        public AccordTopologyService topologyService()
+        {
+            return delegate.topologyService();
         }
 
         @Nonnull
         @Override
-        public TxnResult coordinate(long minEpoch, @Nonnull Txn txn, @Nonnull ConsistencyLevel consistencyLevel, RequestTime requestTime)
+        public TxnResult coordinate(long minEpoch, @Nonnull Txn txn, @Nonnull ConsistencyLevel consistencyLevel, RequestTime requestTime, long minHlc)
         {
-            return delegate.coordinate(minEpoch, txn, consistencyLevel, requestTime);
+            return delegate.coordinate(minEpoch, txn, consistencyLevel, requestTime, minHlc);
+        }
+
+        @Override
+        public List<AccordExecutor> executors()
+        {
+            return delegate.executors();
+        }
+
+        @Override
+        public boolean isEnabled()
+        {
+            return delegate.isEnabled();
         }
 
         @Nonnull
         @Override
-        public IAccordResult<TxnResult> coordinateAsync(long minEpoch, @Nonnull Txn txn, @Nonnull ConsistencyLevel consistencyLevel, RequestTime requestTime)
+        public IAccordResult<TxnResult> coordinateAsync(long minEpoch, long minHlc, @Nonnull Txn txn, @Nonnull ConsistencyLevel consistencyLevel, RequestTime requestTime)
         {
-            return delegate.coordinateAsync(minEpoch, txn, consistencyLevel, requestTime);
+            return delegate.coordinateAsync(minEpoch, minHlc, txn, consistencyLevel, requestTime);
         }
 
         @Override
@@ -415,9 +483,21 @@ public interface IAccordService
         }
 
         @Override
-        public void startup()
+        public void localStartup()
         {
-            delegate.startup();
+            delegate.localStartup();
+        }
+
+        @Override
+        public Future<Void> flushCaches()
+        {
+            return delegate.flushCaches();
+        }
+
+        @Override
+        public void markShuttingDown()
+        {
+            delegate.markShuttingDown();
         }
 
         @Override
@@ -433,9 +513,15 @@ public interface IAccordService
         }
 
         @Override
-        public Future<Void> epochReady(Epoch epoch)
+        public Future<Void> epochReady(Epoch epoch, Function<EpochReady, AsyncResult<Void>> get)
         {
-            return delegate.epochReady(epoch);
+            return delegate.epochReady(epoch, get);
+        }
+
+        @Override
+        public Future<Void> epochReadyFor(ClusterMetadata epoch, Function<EpochReady, AsyncResult<Void>> get)
+        {
+            return delegate.epochReadyFor(epoch, get);
         }
 
         @Override
@@ -463,14 +549,7 @@ public interface IAccordService
         }
 
         @Override
-        public List<CommandStoreTxnBlockedGraph> debugTxnBlockedGraph(TxnId txnId)
-        {
-            return delegate.debugTxnBlockedGraph(txnId);
-        }
-
-        @Nullable
-        @Override
-        public Long minEpoch()
+        public long minEpoch()
         {
             return delegate.minEpoch();
         }
@@ -488,15 +567,15 @@ public interface IAccordService
         }
 
         @Override
-        public boolean shouldAcceptMessages()
-        {
-            return delegate.shouldAcceptMessages();
-        }
-
-        @Override
         public Node node()
         {
             return delegate.node();
+        }
+
+        @Override
+        public void ensureMinHlc(long minHlc)
+        {
+            delegate.ensureMinHlc(minHlc);
         }
     }
 }

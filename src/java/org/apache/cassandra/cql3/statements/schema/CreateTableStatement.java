@@ -73,6 +73,7 @@ import org.apache.cassandra.schema.UserFunctions;
 import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.service.reads.repair.ReadRepairStrategy;
 import org.apache.cassandra.tcm.ClusterMetadata;
+import org.apache.cassandra.tcm.serialization.Version;
 import org.apache.cassandra.transport.Event.SchemaChange;
 import org.apache.cassandra.transport.Event.SchemaChange.Change;
 import org.apache.cassandra.transport.Event.SchemaChange.Target;
@@ -135,6 +136,12 @@ public final class CreateTableStatement extends AlterSchemaStatement
         return super.cql();
     }
 
+    @Override
+    public boolean compatibleWith(ClusterMetadata metadata)
+    {
+        return metadata.directory.commonSerializationVersion.isAtLeast(Version.V0);
+    }
+
     public Keyspaces apply(ClusterMetadata metadata)
     {
         Keyspaces schema = metadata.schema.getKeyspaces();
@@ -173,7 +180,7 @@ public final class CreateTableStatement extends AlterSchemaStatement
             throw ire("read_repair must be set to 'NONE' for transiently replicated keyspaces");
         }
 
-        if (!table.params.compression.isEnabled())
+        if (!table.params.compression.isEnabled() && !SchemaConstants.isSystemKeyspace(table.keyspace))
             Guardrails.uncompressedTablesEnabled.ensureEnabled(state);
 
         if (table.params.transactionalMode.accordIsEnabled && SchemaConstants.isSystemKeyspace(keyspaceName))

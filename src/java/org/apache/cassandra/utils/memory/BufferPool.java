@@ -46,7 +46,6 @@ import org.slf4j.LoggerFactory;
 import io.netty.util.concurrent.FastThreadLocal;
 
 import org.apache.cassandra.io.compress.BufferType;
-import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.metrics.BufferPoolMetrics;
 import org.apache.cassandra.utils.NoSpamLogger;
 import org.apache.cassandra.utils.Shared;
@@ -816,7 +815,7 @@ public class BufferPool
 
             if (chunk == null)
             {
-                FileUtils.clean(buffer);
+                MemoryUtil.clean(buffer);
                 updateOverflowMemoryUsage(-size);
             }
             else
@@ -1563,7 +1562,7 @@ public class BufferPool
             if (parent != null)
                 parent.free(slab);
             else
-                FileUtils.clean(slab);
+                MemoryUtil.clean(slab);
         }
 
         static void unsafeRecycle(Chunk chunk)
@@ -1648,5 +1647,31 @@ public class BufferPool
         return   (pool.chunks.chunk0 != null ? 1 : 0)
                  + (pool.chunks.chunk1 != null ? 1 : 0)
                  + (pool.chunks.chunk2 != null ? 1 : 0);
+    }
+
+    /**
+     * @return the inner buffer if it has a BufferPool.Chunk attached
+     *  and originalBuffer in other cases
+     */
+    public ByteBuffer unwrapBufferPoolManagedBuffer(ByteBuffer originalBuffer)
+    {
+        int MAX_DEPTH = 32; // a protection against possible loops in attachments
+        int depth = 0;
+        ByteBuffer buffer = originalBuffer;
+        do
+        {
+            if (buffer == null || !isExactlyDirect(buffer))
+                return originalBuffer;
+            if (Chunk.getParentChunk(buffer) != null)
+                return buffer;
+
+            Object attachment = MemoryUtil.getAttachment(buffer);
+            if (!(attachment instanceof ByteBuffer))
+                return originalBuffer;
+            buffer = (ByteBuffer) attachment;
+            depth++;
+        }
+        while (depth < MAX_DEPTH);
+        return originalBuffer;
     }
 }

@@ -24,6 +24,7 @@ import java.util.concurrent.TimeUnit;
 import com.google.common.annotations.VisibleForTesting;
 
 import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.cql3.CqlBuilder;
 import org.apache.cassandra.db.filter.ClusteringIndexFilter;
 import org.apache.cassandra.db.filter.ColumnFilter;
 import org.apache.cassandra.db.filter.DataLimits;
@@ -57,12 +58,14 @@ import org.apache.cassandra.service.reads.ReadCoordinator;
 import org.apache.cassandra.tcm.Epoch;
 import org.apache.cassandra.tracing.Tracing;
 import org.apache.cassandra.transport.Dispatcher;
+import org.apache.cassandra.utils.NoSpamLogger;
 
 /**
  * A read command that selects a (part of a) range of partitions.
  */
 public class PartitionRangeReadCommand extends ReadCommand implements PartitionRangeReadQuery
 {
+    private static final NoSpamLogger noSpamLogger = NoSpamLogger.getLogger(logger, 1L, TimeUnit.SECONDS);
     protected static final SelectionDeserializer selectionDeserializer = new Deserializer();
 
     protected final Slices requestedSlices;
@@ -433,6 +436,9 @@ public class PartitionRangeReadCommand extends ReadCommand implements PartitionR
 
             final int finalSelectedSSTables = selectedSSTablesCnt;
 
+            if (finalSelectedSSTables > DatabaseDescriptor.getSSTablesPerReadLogThreshold())
+                noSpamLogger.info("The following query '{}' has read {} SSTables.", this.toCQLString(), finalSelectedSSTables);
+
             // iterators can be empty for offline tools
             if (inputCollector.isEmpty())
                 return EmptyIterators.unfilteredPartition(metadata());
@@ -524,11 +530,12 @@ public class PartitionRangeReadCommand extends ReadCommand implements PartitionR
         return Verb.RANGE_REQ;
     }
 
-    protected void appendCQLWhereClause(StringBuilder sb)
+    @Override
+    protected void appendCQLWhereClause(CqlBuilder builder)
     {
         String filterString = dataRange().toCQLString(metadata(), rowFilter());
         if (!filterString.isEmpty())
-            sb.append(" WHERE ").append(filterString);
+            builder.append(" WHERE ").append(filterString);
     }
 
     @Override
@@ -645,7 +652,7 @@ public class PartitionRangeReadCommand extends ReadCommand implements PartitionR
         public UnfilteredPartitionIterator executeLocally(ReadExecutionController executionController)
         {
             VirtualTable view = VirtualKeyspaceRegistry.instance.getTableNullable(metadata().id);
-            UnfilteredPartitionIterator resultIterator = view.select(dataRange, columnFilter(), rowFilter());
+            UnfilteredPartitionIterator resultIterator = view.select(dataRange, columnFilter(), rowFilter(), limits());
             return limits().filter(rowFilter().filter(resultIterator, nowInSec()), nowInSec(), selectsFullPartition());
         }
 

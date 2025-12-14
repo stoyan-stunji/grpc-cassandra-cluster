@@ -71,25 +71,24 @@ public class AccordUpdateParameters
         return data;
     }
 
-    public UpdateParameters updateParameters(TableMetadata metadata, DecoratedKey dk, int rowIndex)
+    public UpdateParameters updateParameters(TableMetadata metadata, DecoratedKey dk, int rowIndex, long overrideTimestamp)
     {
         // This is currently only used by Guardrails, but this logically have issues with Accord as drifts in config
         // values could cause unexpected issues in Accord. (ex. some nodes reject writes while others accept)
         // For the time being, guardrails are disabled for Accord queries.
         ClientState disabledGuardrails = null;
 
-        // TODO : How should Accord work with TTL?
         int ttl = metadata.params.defaultTimeToLive;
         return new RowUpdateParameters(metadata,
                                        disabledGuardrails,
                                        options,
-                                       timestamp,
+                                       overrideTimestamp == TxnWrite.NO_TIMESTAMP ? timestamp : overrideTimestamp,
                                        MICROSECONDS.toSeconds(timestamp),
                                        ttl,
-                                       prefetchRow(metadata, dk, rowIndex));
+                                       prefetchRow(dk, rowIndex));
     }
 
-    private Map<DecoratedKey, Partition> prefetchRow(TableMetadata metadata, DecoratedKey dk, int index)
+    private Map<DecoratedKey, Partition> prefetchRow(DecoratedKey dk, int index)
     {
         if (data != null)
         {
@@ -103,7 +102,6 @@ public class AccordUpdateParameters
                         checkState(data.entrySet().size() == 1, "CAS read should only have one entry");
                         return ImmutableMap.of(dk, value);
                     case AUTO_READ:
-                        // TODO (review): Is this the right DK being passed into that matches what we used to store in TxnDataName
                         if (TxnData.txnDataNameIndex(name) == index)
                             return ImmutableMap.of(dk, value);
                     default:

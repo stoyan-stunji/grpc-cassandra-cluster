@@ -22,6 +22,7 @@ import javax.annotation.Nullable;
 
 import accord.api.LocalListeners;
 import accord.api.Result;
+import accord.coordinate.ExecuteFlag.ExecuteFlags;
 import accord.local.Command;
 import accord.local.Node.Id;
 import accord.local.SafeCommand;
@@ -29,6 +30,7 @@ import accord.local.SafeCommandStore;
 import accord.local.StoreParticipants;
 import accord.messages.Apply;
 import accord.messages.MessageType;
+import accord.primitives.Ballot;
 import accord.primitives.Deps;
 import accord.primitives.FullRoute;
 import accord.primitives.PartialDeps;
@@ -65,23 +67,23 @@ public class AccordInteropApply extends Apply implements LocalListeners.ComplexL
     public static final Apply.Factory FACTORY = new Apply.Factory()
     {
         @Override
-        public Apply create(Kind kind, Id to, Topologies participates, TxnId txnId, Route<?> route, Txn txn, Timestamp executeAt, Deps deps, Writes writes, Result result, FullRoute<?> fullRoute)
+        public Apply create(Kind kind, Id to, Topologies participates, TxnId txnId, Ballot ballot, Route<?> route, Txn txn, Timestamp executeAt, Deps deps, Writes writes, Result result, FullRoute<?> fullRoute, ExecuteFlags flags)
         {
             checkArgument(kind != Kind.Maximal, "Shouldn't need to send a maximal commit with interop support");
             ConsistencyLevel commitCL = txn.update() instanceof AccordUpdate ? ((AccordUpdate) txn.update()).cassandraCommitCL() : null;
             // Any asynchronous apply option should use the regular Apply that doesn't wait for writes to complete
             if (commitCL == null || commitCL == ConsistencyLevel.ANY)
-                return Apply.FACTORY.create(kind, to, participates, txnId, route, txn, executeAt, deps, writes, result, fullRoute);
-            return new AccordInteropApply(kind, to, participates, txnId, route, txn, executeAt, deps, writes, result, fullRoute);
+                return Apply.FACTORY.create(kind, to, participates, txnId, ballot, route, txn, executeAt, deps, writes, result, fullRoute, flags);
+            return new AccordInteropApply(kind, to, participates, txnId, ballot, route, txn, executeAt, deps, writes, result, fullRoute, flags);
         }
     };
 
     public static final IVersionedSerializer<AccordInteropApply> serializer = new ApplySerializer<AccordInteropApply>()
     {
         @Override
-        protected AccordInteropApply deserializeApply(TxnId txnId, Route<?> scope, long minEpoch, long waitForEpoch, long maxEpoch, Apply.Kind kind, Timestamp executeAt, PartialDeps deps, PartialTxn txn, @Nullable FullRoute<?> fullRoute, Writes writes, Result result)
+        protected AccordInteropApply deserializeApply(TxnId txnId, Ballot ballot, Route<?> scope, long minEpoch, long waitForEpoch, long maxEpoch, Apply.Kind kind, Timestamp executeAt, PartialDeps deps, PartialTxn txn, @Nullable FullRoute<?> fullRoute, Writes writes, Result result, ExecuteFlags flags)
         {
-            return new AccordInteropApply(kind, txnId, scope, minEpoch, waitForEpoch, maxEpoch, executeAt, deps, txn, fullRoute, writes, result);
+            return new AccordInteropApply(kind, txnId, ballot, scope, minEpoch, waitForEpoch, maxEpoch, executeAt, deps, txn, fullRoute, writes, result, flags);
         }
     };
 
@@ -89,14 +91,14 @@ public class AccordInteropApply extends Apply implements LocalListeners.ComplexL
     transient Int2ObjectHashMap<LocalListeners.Registered> listeners;
     boolean failed;
 
-    private AccordInteropApply(Kind kind, TxnId txnId, Route<?> route, long minEpoch, long waitForEpoch, long maxEpoch, Timestamp executeAt, PartialDeps deps, @Nullable PartialTxn txn, @Nullable FullRoute<?> fullRoute, Writes writes, Result result)
+    private AccordInteropApply(Kind kind, TxnId txnId, Ballot ballot, Route<?> route, long minEpoch, long waitForEpoch, long maxEpoch, Timestamp executeAt, PartialDeps deps, @Nullable PartialTxn txn, @Nullable FullRoute<?> fullRoute, Writes writes, Result result, ExecuteFlags flags)
     {
-        super(kind, txnId, route, minEpoch, waitForEpoch, maxEpoch, executeAt, deps, txn, fullRoute, writes, result);
+        super(kind, txnId, ballot, route, minEpoch, waitForEpoch, maxEpoch, executeAt, deps, txn, fullRoute, writes, result, flags);
     }
 
-    private AccordInteropApply(Kind kind, Id to, Topologies participates, TxnId txnId, Route<?> route, Txn txn, Timestamp executeAt, Deps deps, Writes writes, Result result, FullRoute<?> fullRoute)
+    private AccordInteropApply(Kind kind, Id to, Topologies participates, TxnId txnId, Ballot ballot, Route<?> route, Txn txn, Timestamp executeAt, Deps deps, Writes writes, Result result, FullRoute<?> fullRoute, ExecuteFlags flags)
     {
-        super(kind, to, participates, txnId, route, txn, executeAt, deps, writes, result, fullRoute);
+        super(kind, to, participates, txnId, ballot, route, txn, executeAt, deps, writes, result, fullRoute, flags);
     }
 
     @Override
@@ -165,14 +167,6 @@ public class AccordInteropApply extends Apply implements LocalListeners.ComplexL
     }
 
     @Override
-    public ApplyReply reduce(ApplyReply r1, ApplyReply r2)
-    {
-        return r1 == null || r2 == null
-               ? r1 == null ? r2 : r1
-               : r1.compareTo(r2) >= 0 ? r1 : r2;
-    }
-
-    @Override
     protected void acceptInternal(ApplyReply reply, Throwable failure)
     {
         if (reply == ApplyReply.Insufficient)
@@ -184,7 +178,7 @@ public class AccordInteropApply extends Apply implements LocalListeners.ComplexL
         else if (failure != null)
         {
             node.reply(replyTo, replyContext, null, failure);
-            node.agent().onUncaughtException(failure);
+            node.agent().onException(failure);
             fail();
         }
 
@@ -207,12 +201,6 @@ public class AccordInteropApply extends Apply implements LocalListeners.ComplexL
     }
 
     @Override
-    public TxnId primaryTxnId()
-    {
-        return txnId;
-    }
-
-    @Override
     public Unseekables<?> keys()
     {
         return scope;
@@ -229,10 +217,10 @@ public class AccordInteropApply extends Apply implements LocalListeners.ComplexL
     {
         return "AccordInteropApply{" +
                "txnId:" + txnId +
-               ", deps:" + deps +
+               ", deps:" + deps() +
                ", executeAt:" + executeAt +
-               ", writes:" + writes +
-               ", result:" + result +
+               ", writes:" + writes() +
+               ", result:" + result() +
                '}';
     }
 

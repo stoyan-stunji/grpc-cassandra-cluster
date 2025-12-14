@@ -121,7 +121,7 @@ public class Symbol implements ReferenceExpression, Comparable<Symbol>
 
     public String detailedName()
     {
-        return symbol + " " + type.asCQL3Type() + (reversed ? " (reversed)" : "");
+        return symbol + ' ' + type.asCQL3Type() + (reversed ? " (reversed)" : "");
     }
 
     @Override
@@ -151,11 +151,22 @@ public class Symbol implements ReferenceExpression, Comparable<Symbol>
         return toCQL().compareTo(o.toCQL());
     }
 
+    @Override
+    public Symbol column()
+    {
+        return this;
+    }
+
     public static class UnquotedSymbol extends Symbol
     {
         public UnquotedSymbol(String symbol, AbstractType<?> type)
         {
             super(symbol, type);
+        }
+
+        public static UnquotedSymbol unknownType(String name)
+        {
+            return new UnquotedSymbol(name, BytesType.instance);
         }
 
         @Override
@@ -171,12 +182,6 @@ public class Symbol implements ReferenceExpression, Comparable<Symbol>
             if (o == null || getClass() != o.getClass()) return false;
             UnquotedSymbol symbol1 = (UnquotedSymbol) o;
             return Objects.equals(symbol, symbol1.symbol);
-        }
-
-        @Override
-        public int hashCode()
-        {
-            return Objects.hash(symbol);
         }
     }
 }

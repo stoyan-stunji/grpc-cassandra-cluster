@@ -46,11 +46,12 @@ import org.junit.BeforeClass;
 import org.junit.Test;
 
 import accord.api.Agent;
+import accord.api.AsyncExecutor;
 import accord.api.DataStore;
 import accord.api.Journal;
 import accord.api.Key;
+import accord.api.OwnershipEventListener;
 import accord.api.ProgressLog;
-import accord.api.Result;
 import accord.api.RoutingKey;
 import accord.api.Timeouts;
 import accord.impl.AbstractSafeCommandStore;
@@ -63,8 +64,10 @@ import accord.local.ICommand;
 import accord.local.Node;
 import accord.local.NodeCommandStoreService;
 import accord.local.PreLoadContext;
+import accord.local.RedundantBefore;
 import accord.local.SafeCommand;
 import accord.local.SafeCommandStore;
+import accord.local.SequentialAsyncExecutor;
 import accord.local.StoreParticipants;
 import accord.local.TimeService;
 import accord.local.cfk.CommandsForKey;
@@ -96,6 +99,7 @@ import accord.utils.AccordGens;
 import accord.utils.Gen;
 import accord.utils.Gens;
 import accord.utils.RandomSource;
+import accord.utils.SimpleBitSets;
 import accord.utils.SortedArrays;
 import accord.utils.UnhandledEnum;
 import accord.utils.async.AsyncChain;
@@ -106,7 +110,6 @@ import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.schema.KeyspaceParams;
 import org.apache.cassandra.schema.TableId;
 import org.apache.cassandra.service.StorageService;
-import org.apache.cassandra.service.accord.AccordTestUtils;
 import org.apache.cassandra.service.accord.api.TokenKey;
 import org.apache.cassandra.service.accord.txn.TxnData;
 import org.apache.cassandra.service.accord.txn.TxnWrite;
@@ -118,7 +121,7 @@ import static accord.api.ProtocolModifiers.Toggles.setTransitiveDependenciesAreV
 import static accord.local.cfk.CommandsForKey.NO_BOUNDS_INFO;
 import static accord.primitives.Known.KnownExecuteAt.ExecuteAtErased;
 import static accord.primitives.Known.KnownExecuteAt.ExecuteAtUnknown;
-import static accord.primitives.Status.Durability.Majority;
+import static accord.primitives.Status.Durability.AllQuorums;
 import static accord.primitives.Status.Durability.NotDurable;
 import static accord.utils.Property.qt;
 import static accord.utils.SortedArrays.Search.FAST;
@@ -179,29 +182,30 @@ public class CommandsForKeySerializerTest
             if (saveStatus.known.isDefinitionKnown())
                 builder.partialTxn(txn);
 
-            builder.setParticipants(StoreParticipants.all(txn.keys().toRoute(txn.keys().get(0).someIntersectingRoutingKey(null))));
-            builder.durability(isDurable ? Majority : NotDurable);
+            StoreParticipants participants = StoreParticipants.all(txn.keys().toRoute(txn.keys().get(0).someIntersectingRoutingKey(null)));
+            builder.setParticipants(participants);
+            builder.durability(isDurable ? AllQuorums : NotDurable);
             if (saveStatus.known.deps().hasPreAcceptedOrProposedOrDecidedDeps())
             {
                 try (KeyDeps.Builder keyBuilder = KeyDeps.builder();)
                 {
                     for (TxnId id : deps)
                         keyBuilder.add(((Key)txn.keys().get(0)).toUnseekable(), id);
-                    builder.partialDeps(new PartialDeps(AccordTestUtils.fullRange(txn), keyBuilder.build(), RangeDeps.NONE));
+                    builder.partialDeps(new PartialDeps(participants.touches(), keyBuilder.build(), RangeDeps.NONE));
                 }
             }
 
             builder.executeAt(executeAt);
             builder.promised(ballot);
             builder.acceptedOrCommitted(ballot);
-            builder.durability(isDurable ? Majority : NotDurable);
+            builder.durability(isDurable ? AllQuorums : NotDurable);
             if (saveStatus.compareTo(SaveStatus.Stable) >= 0 && !saveStatus.hasBeen(Status.Truncated))
                 builder.waitingOn(Command.WaitingOn.empty(txnId.domain()));
 
             if (saveStatus.known.outcome() == Known.Outcome.Apply)
             {
                 if (txnId.is(Kind.Write))
-                    builder.writes(new Writes(txnId, executeAt, txn.keys(), new TxnWrite(TableMetadatas.none(), Collections.emptyList(), true)));
+                    builder.writes(new Writes(txnId, executeAt, txn.keys(), new TxnWrite(TableMetadatas.none(), Collections.emptyList(), SimpleBitSets.allSet(1))));
                 builder.result(new TxnData());
             }
             return builder;
@@ -244,7 +248,6 @@ public class CommandsForKeySerializerTest
                     return Command.Committed.committed(builder(), saveStatus);
 
                 case PreApplied:
-                case Applying:
                 case Applied:
                     return Command.Executed.executed(builder(), saveStatus);
 
@@ -423,7 +426,7 @@ public class CommandsForKeySerializerTest
     @Test
     public void serde()
     {
-        testOne(629993588068216851L);
+        testOne(7082228630293368049L);
         Random random = new Random();
         for (int i = 0 ; i < 10000 ; ++i)
         {
@@ -479,8 +482,7 @@ public class CommandsForKeySerializerTest
                 }
             }
 
-            // TODO (expected): we currently don't explore TruncatedApply statuses because we don't transition through all phases and therefore don't adopt the Applied status
-            Choices<SaveStatus> saveStatusChoices = Choices.uniform(EnumSet.complementOf(EnumSet.of(SaveStatus.TruncatedApply, SaveStatus.TruncatedUnapplied, SaveStatus.TruncatedApplyWithOutcome)).toArray(SaveStatus[]::new));
+            Choices<SaveStatus> saveStatusChoices = Choices.uniform(EnumSet.complementOf(EnumSet.of(SaveStatus.Applying, SaveStatus.TruncatedApply, SaveStatus.TruncatedUnapplied, SaveStatus.TruncatedApplyWithOutcome)).toArray(SaveStatus[]::new));
             Supplier<SaveStatus> saveStatusSupplier = () -> {
                 SaveStatus result = saveStatusChoices.choose(source);
                 while (result.is(Status.Truncated)) // we don't currently process truncations
@@ -521,7 +523,7 @@ public class CommandsForKeySerializerTest
             {
                 int next = source.nextInt(commands.size());
                 Command command = commands.get(next);
-                cfk = cfk.update(new TestSafeCommandStore(command.txnId()), command).cfk();
+                cfk = cfk.update(new TestSafeCommandStore(PreLoadContext.contextFor(command.txnId(), "Test")), command).cfk();
                 commands.set(next, commands.get(commands.size() - 1));
                 commands.remove(commands.size() - 1);
             }
@@ -610,7 +612,7 @@ public class CommandsForKeySerializerTest
             else unmanaged = CommandsForKey.NO_PENDING_UNMANAGED;
 
             long maxUniqueHlc = rs.nextLong(0, Long.MAX_VALUE);
-            CommandsForKey expected = CommandsForKey.SerializerSupport.create(pk, info, maxUniqueHlc, unmanaged, TxnId.NONE, NO_BOUNDS_INFO);
+            CommandsForKey expected = CommandsForKey.SerializerSupport.create(pk, info, maxUniqueHlc, unmanaged, TxnId.NONE, NO_BOUNDS_INFO, true);
 
             ByteBuffer buffer = Serialize.toBytesWithoutKey(expected);
             CommandsForKey roundTrip = Serialize.fromBytes(pk, buffer);
@@ -627,7 +629,7 @@ public class CommandsForKeySerializerTest
         TxnId txnId = TxnId.fromValues(11,34052499,2,1);
         CommandsForKey expected = CommandsForKey.SerializerSupport.create(pk,
                                                      new TxnInfo[] { TxnInfo.create(txnId, InternalStatus.PREACCEPTED_WITHOUT_DEPS, true, txnId, TxnId.NO_TXNIDS, Ballot.ZERO) },
-                                                                          0, CommandsForKey.NO_PENDING_UNMANAGED, TxnId.NONE, NO_BOUNDS_INFO);
+                                                                          0, CommandsForKey.NO_PENDING_UNMANAGED, TxnId.NONE, NO_BOUNDS_INFO, true);
 
         ByteBuffer buffer = Serialize.toBytesWithoutKey(expected);
         CommandsForKey roundTrip = Serialize.fromBytes(pk, buffer);
@@ -644,24 +646,24 @@ public class CommandsForKeySerializerTest
                   null,
                   null,
                   ignore -> new ProgressLog.NoOpProgressLog(),
-                  ignore -> new DefaultLocalListeners(new DefaultRemoteListeners((a, b, c, d, e)->{}), DefaultLocalListeners.DefaultNotifySink.INSTANCE),
+                  ignore -> new DefaultLocalListeners(null, new DefaultRemoteListeners((a, b, c, d, e)->{}), DefaultLocalListeners.DefaultNotifySink.INSTANCE),
                   new EpochUpdateHolder());
         }
 
         @Override public boolean inStore() { return true; }
-        @Override public Journal.Loader loader() { throw new UnsupportedOperationException(); }
+        @Override public AsyncChain<Void> chain(PreLoadContext context, Consumer<? super SafeCommandStore> consumer) { throw new UnsupportedOperationException();}
+        @Override public <T> AsyncChain<T> chain(PreLoadContext context, Function<? super SafeCommandStore, T> apply) { throw new UnsupportedOperationException(); }
+
+        @Override public Journal.Replayer replayer() { throw new UnsupportedOperationException(); }
+
+        @Override protected void ensureDurable(Ranges ranges, RedundantBefore onSuccess) {}
         @Override public Agent agent() { return this; }
-        @Override public AsyncChain<Void> build(PreLoadContext context, Consumer<? super SafeCommandStore> consumer) { return null; }
-        @Override public <T> AsyncChain<T> build(PreLoadContext context, Function<? super SafeCommandStore, T> apply) { throw new UnsupportedOperationException(); }
+        @Override public void execute(Runnable run) {}
         @Override public void shutdown() { }
-        @Override protected void registerTransitive(SafeCommandStore safeStore, RangeDeps deps){ }
-        @Override public <T> AsyncChain<T> build(Callable<T> task) { throw new UnsupportedOperationException(); }
-        @Override public void onRecover(Node node, Result success, Throwable fail) { throw new UnsupportedOperationException(); }
-        @Override public void onInconsistentTimestamp(Command command, Timestamp prev, Timestamp next) { throw new UnsupportedOperationException(); }
-        @Override public void onFailedBootstrap(int attempts, String phase, Ranges ranges, Runnable retry, Throwable failure) { throw new UnsupportedOperationException(); }
-        @Override public void onStale(Timestamp staleSince, Ranges ranges) { throw new UnsupportedOperationException(); }
-        @Override public void onUncaughtException(Throwable t) { throw new UnsupportedOperationException(); }
-        @Override public void onCaughtException(Throwable t, String context) { throw new UnsupportedOperationException(); }
+        @Override public <T> AsyncChain<T> chain(Callable<T> call) { throw new UnsupportedOperationException(); }
+        @Override public OwnershipEventListener ownershipEvents() { return null; }
+        @Override public void onException(Throwable t) { throw new UnsupportedOperationException(); }
+        @Override public void onException(Throwable t, String context) { throw new UnsupportedOperationException(); }
         @Override public boolean rejectPreAccept(TimeService time, TxnId txnId) { throw new UnsupportedOperationException(); }
         @Override public long cfkHlcPruneDelta() { return 0; }
         @Override public int cfkPruneInterval() { return 0; }
@@ -669,9 +671,11 @@ public class CommandsForKeySerializerTest
         @Override public long maxConflictsPruneInterval() { return 0; }
         @Override public Txn emptySystemTxn(Kind kind, Routable.Domain domain) { throw new UnsupportedOperationException(); }
         @Override public long slowCoordinatorDelay(Node node, SafeCommandStore safeStore, TxnId txnId, TimeUnit units, int retryCount) { return 0; }
+        @Override public boolean isSlowCoordinator(long elapsed, TimeUnit units, TxnId txnId, int attempt) { return false; }
         @Override public long slowReplicaDelay(Node node, SafeCommandStore safeStore, TxnId txnId, int retryCount, ProgressLog.BlockedUntil blockedUntil, TimeUnit units) { return 0; }
         @Override public long slowAwaitDelay(Node node, SafeCommandStore safeStore, TxnId txnId, int retryCount, ProgressLog.BlockedUntil retrying, TimeUnit units) { return 0; }
         @Override public long retrySyncPointDelay(Node node, int attempt, TimeUnit units) { return 0; }
+        @Override public long retryTopologyDelay(Node node, int attempt, TimeUnit units) { return 0; }
         @Override public long retryDurabilityDelay(Node node, int attempt, TimeUnit units) { return 0; }
         @Override public long expireEpochWait(TimeUnit units) { return 0; }
         @Override public long expiresAt(ReplyContext replyContext, TimeUnit unit) { return 0; }
@@ -698,6 +702,8 @@ public class CommandsForKeySerializerTest
         @Override public ProgressLog progressLog() { return null; }
         @Override public NodeCommandStoreService node() { return new NodeCommandStoreService()
         {
+            @Override public AsyncExecutor someExecutor() { throw new UnsupportedOperationException(); }
+            @Override public SequentialAsyncExecutor someSequentialExecutor() { throw new UnsupportedOperationException(); }
             @Override public long epoch() { return 0;}
             @Override public Node.Id id() { return Node.Id.NONE; }
             @Override public Timeouts timeouts() { return null; }
@@ -705,6 +711,9 @@ public class CommandsForKeySerializerTest
             @Override public DurabilityService durability() { return null; }
             @Override public long uniqueNow(long atLeast) { return 0; }
             @Override public TopologyManager topology() { return null; }
+            @Override public long currentStamp() { return 0; }
+            @Override public void updateStamp() { throw new UnsupportedOperationException(); }
+            @Override public boolean isReplaying() { return false; }
             @Override public long now() { return 0; }
             @Override public long elapsed(TimeUnit unit) { return 0; }
         }; }

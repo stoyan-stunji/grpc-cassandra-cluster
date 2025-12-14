@@ -60,6 +60,11 @@ public interface Conditional extends Expression
         return Collections.singletonList(this);
     }
 
+    static Builder builder()
+    {
+        return new Builder();
+    }
+
     class Where implements Conditional
     {
         public enum Inequality
@@ -86,7 +91,7 @@ public interface Conditional extends Expression
                     case EQUAL: return rc == 0;
                     case NOT_EQUAL: return rc != 0;
                     case GREATER_THAN: return rc > 0;
-                    case GREATER_THAN_EQ: return rc >=0;
+                    case GREATER_THAN_EQ: return rc >= 0;
                     case LESS_THAN: return rc < 0;
                     case LESS_THAN_EQ: return rc <=0;
                     default: throw new UnsupportedOperationException(this.name());
@@ -321,8 +326,8 @@ public interface Conditional extends Expression
 
     interface EqBuilder<T extends EqBuilder<T>>
     {
-        T value(Symbol symbol, Expression e);
-        default T value(Symbol symbol, Object value)
+        T value(ReferenceExpression symbol, Expression e);
+        default T value(ReferenceExpression symbol, Object value)
         {
             return value(symbol, new Bind(value, symbol.type()));
         }
@@ -405,10 +410,10 @@ public interface Conditional extends Expression
             return in(new Symbol(name, type), values.stream().map(v -> new Bind(v, type)).collect(Collectors.toList()));
         }
 
-        T is(Symbol ref, Is.Kind kind);
+        T is(ReferenceExpression ref, Is.Kind kind);
 
         @Override
-        default T value(Symbol symbol, Expression e)
+        default T value(ReferenceExpression symbol, Expression e)
         {
             return where(symbol, Where.Inequality.EQUAL, e);
         }
@@ -478,9 +483,14 @@ public interface Conditional extends Expression
         }
 
         @Override
-        public Builder is(Symbol ref, Is.Kind kind)
+        public Builder is(ReferenceExpression ref, Is.Kind kind)
         {
             return add(new Is(ref, kind));
+        }
+
+        public Builder is(String ref, Is.Kind kind)
+        {
+            return is(Symbol.unknownType(ref), kind);
         }
 
         public Conditional build()

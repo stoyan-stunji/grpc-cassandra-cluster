@@ -31,6 +31,7 @@ import com.google.common.annotations.VisibleForTesting;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import accord.topology.EpochReady;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.SystemKeyspace;
 import org.apache.cassandra.db.TypeSizes;
@@ -257,8 +258,10 @@ public class Move extends MultiStepOperation<Epoch>
                     }
 
                     StreamResultFuture streamResult = streamPlan.execute();
-                    Future<Void> accordReady = AccordService.instance().epochReady(metadata.epoch);
-                    FutureCombiner.allOf(streamResult, accordReady).get();
+
+                    Future<?> accordReady = AccordService.instance().epochReadyFor(metadata, EpochReady::reads);
+                    Future<?> ready = FutureCombiner.allOf(streamResult, accordReady);
+                    ready.get();
                     StorageService.instance.repairPaxosForTopologyChange("move");
                 }
                 catch (InterruptedException e)

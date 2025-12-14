@@ -18,22 +18,17 @@
 
 package org.apache.cassandra.tcm;
 
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
-import java.util.concurrent.TimeUnit;
-
 import com.codahale.metrics.Meter;
-
-import accord.utils.Invariants;
+import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.config.DurationSpec;
 import org.apache.cassandra.metrics.TCMMetrics;
+import org.apache.cassandra.service.RetryStrategy;
+import org.apache.cassandra.service.TimeoutStrategy;
 import org.apache.cassandra.service.WaitStrategy;
 import org.apache.cassandra.tcm.log.Entry;
-import org.apache.cassandra.tcm.log.LogState;
 
 import static java.util.concurrent.TimeUnit.NANOSECONDS;
 import static org.apache.cassandra.config.DatabaseDescriptor.getCmsAwaitTimeout;
-import static org.apache.cassandra.utils.Clock.Global.nanoTime;
 
 public interface Processor
 {
@@ -56,28 +51,18 @@ public interface Processor
     }
 
     /**
-     * Since we are using message expiration for communicating timeouts to CMS nodes, we have to be careful not
-     * to overflow the long, since messaging is using only 32 bits for deadlines. To achieve that, we are
-     * giving `timeoutNanos` every time we retry, but will retry indefinitely.
+     * To be used only when submitting a STARTUP transformation when a node is restarted with a new set of addresses or
+     * running a new release version.
      */
-    private static Retry unsafeRetryIndefinitely()
+    static Retry unsafeRetryIndefinitely()
     {
-        long timeoutNanos = getCmsAwaitTimeout().to(NANOSECONDS);
         Meter retryMeter = TCMMetrics.instance.commitRetries;
-        return Retry.withNoTimeLimit(retryMeter, new WaitStrategy()
-        {
-            @Override
-            public long computeWaitUntil(int attempts)
-            {
-                return nanoTime() + timeoutNanos;
-            }
-
-            @Override
-            public long computeWait(int attempts, TimeUnit units)
-            {
-                return units.convert(timeoutNanos, NANOSECONDS);
-            }
-        });
+        DurationSpec.IntMillisecondsBound defaultBackoff = DatabaseDescriptor.getDefaultRetryBackoff();
+        DurationSpec.IntMillisecondsBound defaultMaxBackoff = DatabaseDescriptor.getDefaultMaxRetryBackoff();
+        String spec = (defaultBackoff == null ? "100ms" : defaultBackoff.toMilliseconds() + "ms")
+                      + "*attempts <=" + (defaultMaxBackoff == null ? "10s" : defaultMaxBackoff.toMilliseconds() + "ms");
+        WaitStrategy wait = RetryStrategy.parse(spec, TimeoutStrategy.LatencySourceFactory.none());
+        return Retry.withNoTimeLimit(retryMeter, wait);
     }
 
     Commit.Result commit(Entry.Id entryId, Transformation transform, Epoch lastKnown, Retry retryPolicy);
@@ -103,37 +88,4 @@ public interface Processor
     }
 
     ClusterMetadata fetchLogAndWait(Epoch waitFor, Retry retryPolicy);
-
-    /**
-     * Queries node's _local_ state. It is not guaranteed to be contiguous, but can be used for restoring CMS state/
-     */
-    LogState getLocalState(Epoch start, Epoch end, boolean includeSnapshot);
-
-    /**
-     * Queries global log state.
-     */
-    LogState getLogState(Epoch start, Epoch end, boolean includeSnapshot, Retry retryPolicy);
-
-    /**
-     * Reconstructs
-     */
-    default List<ClusterMetadata> reconstruct(Epoch lowEpoch, Epoch highEpoch, Retry retryPolicy)
-    {
-        LogState logState = getLogState(lowEpoch, highEpoch, true, retryPolicy);
-        if (logState.isEmpty()) return Collections.emptyList();
-        List<ClusterMetadata> cms = new ArrayList<>(logState.entries.size());
-
-        ClusterMetadata acc = logState.baseState;
-        cms.add(acc);
-        for (Entry entry : logState.entries)
-        {
-            Invariants.require(entry.epoch.isDirectlyAfter(acc.epoch), "%s should have been directly after %s", entry.epoch, acc.epoch);
-            Transformation.Result res = entry.transform.execute(acc);
-            assert res.isSuccess() : res.toString();
-            acc = res.success().metadata;
-            cms.add(acc);
-        }
-        return cms;
-    }
-
 }

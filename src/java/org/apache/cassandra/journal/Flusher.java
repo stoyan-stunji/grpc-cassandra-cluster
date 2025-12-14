@@ -102,10 +102,12 @@ final class Flusher<K, V>
 
     void shutdown() throws InterruptedException
     {
+        logger.debug("Shutting down " + flushExecutor + " and awaiting termination");
         flushExecutor.shutdown();
         flushExecutor.awaitTermination(1, MINUTES);
         if (fsyncExecutor != null)
         {
+            logger.debug("Shutting down " + fsyncExecutor + " and awaiting termination");
             fsyncExecutor.shutdownNow(); // `now` to interrupt potentially parked runnable
             fsyncExecutor.awaitTermination(1, MINUTES);
         }
@@ -143,10 +145,20 @@ final class Flusher<K, V>
                 }
             }
 
+            private boolean hasWork()
+            {
+                return hasWork(fsyncStartedFor);
+            }
+
+            private boolean hasWork(long lastStartedAt)
+            {
+                return fsyncWaitingSince != lastStartedAt;
+            }
+
             private void awaitWork() throws InterruptedException
             {
                 long lastStartedAt = fsyncStartedFor;
-                if (fsyncWaitingSince != lastStartedAt)
+                if (hasWork(lastStartedAt))
                     return;
 
                 awaitingWork = Thread.currentThread();
@@ -158,7 +170,7 @@ final class Flusher<K, V>
                         throw new InterruptedException();
                     }
 
-                    if (fsyncWaitingSince != lastStartedAt)
+                    if (hasWork(lastStartedAt))
                         break;
 
                     LockSupport.park();
@@ -175,7 +187,9 @@ final class Flusher<K, V>
 
             public void doRun(Interruptible.State state) throws InterruptedException
             {
-                awaitWork();
+                if (state == NORMAL) awaitWork();
+                else if (!hasWork()) return;
+
                 if (fsyncing == null)
                     fsyncing = journal.oldestActiveSegment();
 

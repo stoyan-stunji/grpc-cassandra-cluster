@@ -40,8 +40,11 @@ import accord.primitives.Timestamp;
 import accord.primitives.Txn;
 import accord.primitives.TxnId;
 import accord.primitives.Unseekables;
+import accord.utils.Invariants;
+import org.apache.cassandra.metrics.LogLinearDecayingHistograms;
 import org.apache.cassandra.service.accord.AccordCommandStore.ExclusiveCaches;
 import org.apache.cassandra.service.accord.AccordCommandStore.SafeRedundantBefore;
+import org.apache.cassandra.service.paxos.PaxosState;
 
 import static accord.utils.Invariants.illegalState;
 
@@ -120,7 +123,7 @@ public class AccordSafeCommandStore extends AbstractSafeCommandStore<AccordSafeC
     @Override
     protected void persistFieldUpdates()
     {
-        super.persistFieldUpdates();
+        // Field persistence is handled by AccordTask
     }
 
     protected void persistFieldUpdatesInternal(Runnable onDone)
@@ -134,7 +137,7 @@ public class AccordSafeCommandStore extends AbstractSafeCommandStore<AccordSafeC
             long ticket = AccordCommandStore.nextSafeRedundantBeforeTicket.incrementAndGet();
             SafeRedundantBefore update = new SafeRedundantBefore(ticket, updates.newRedundantBefore);
             Runnable reportRedundantBefore = () -> {
-                AccordCommandStore.safeRedundantBeforeUpdater.accumulateAndGet((AccordCommandStore)commandStore, update, SafeRedundantBefore::max);
+                AccordCommandStore.safeRedundantBeforeUpdater.accumulateAndGet(commandStore, update, SafeRedundantBefore::max);
             };
             Runnable prevOnDone = onDone;
             onDone = prevOnDone == null ? reportRedundantBefore : () -> {
@@ -170,6 +173,13 @@ public class AccordSafeCommandStore extends AbstractSafeCommandStore<AccordSafeC
     }
 
     @Override
+    public void setRangesForEpoch(CommandStores.RangesForEpoch rangesForEpoch)
+    {
+        super.setRangesForEpoch(rangesForEpoch);
+        commandStore.updateMinHlc(PaxosState.ballotTracker().getLowBound().unixMicros() + 1);
+    }
+
+    @Override
     public AccordCommandStore commandStore()
     {
         return commandStore;
@@ -199,6 +209,18 @@ public class AccordSafeCommandStore extends AbstractSafeCommandStore<AccordSafeC
         return commandStore.node();
     }
 
+    public LogLinearDecayingHistograms.Buffer histogramBuffer()
+    {
+        if (task.histogramBuffer == null)
+        {
+            task.histogramBuffer = commandStore.metricsBuffer;
+            if (task.histogramBuffer == null)
+                task.histogramBuffer = commandStore.metricsBuffer = new LogLinearDecayingHistograms.Buffer(commandStore.executor().histograms);
+            Invariants.require(task.histogramBuffer.isEmpty());
+        }
+        return task.histogramBuffer;
+    }
+
     private boolean visitForKey(Unseekables<?> keysOrRanges, Predicate<CommandsForKey> forEach)
     {
         Map<RoutingKey, AccordSafeCommandsForKey> commandsForKey = task.commandsForKey;
@@ -225,7 +247,6 @@ public class AccordSafeCommandStore extends AbstractSafeCommandStore<AccordSafeC
             commandsForRanges.visit(keysOrRanges, startedBefore, testKind, visitor, p1, p2);
     }
 
-    // TODO (expected): instead of accepting a slice, accept the min/max epoch and let implementation handle it
     @Override
     public boolean visit(Unseekables<?> keysOrRanges, TxnId testTxnId, Txn.Kind.Kinds testKind, TestStartedAt testStartedAt, Timestamp testStartedAtTimestamp, ComputeIsDep computeIsDep, AllCommandVisitor visit)
     {

@@ -1113,6 +1113,12 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
         return new SSTableSimpleScanner(this, getPositionsForBoundsIterator(boundsIterator), dfile.diskAccessMode());
     }
 
+    public ISSTableScanner getScanner(AbstractBounds<PartitionPosition> bounds)
+    {
+        PartitionPositionBounds positionBounds = getPositionsForBounds(bounds);
+        return new SSTableSimpleScanner(this, positionBounds == null ? Collections.emptyList() : Collections.singletonList(positionBounds));
+    }
+
 
     /**
      * Create a {@link FileDataInput} for the data file of the sstable represented by this reader. This method returns
@@ -1943,7 +1949,7 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
     @Override
     public int compareTo(SSTableReader other)
     {
-        // Used in IntervalTree with the expecation that compareTo uniquely identifies an SSTableReader
+        // Used in IntervalTree with the expectation that compareTo uniquely identifies an SSTableReader
         // Use accessor for instanceId for mocks
         return instanceId().compareTo(other.instanceId());
     }

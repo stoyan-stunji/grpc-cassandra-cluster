@@ -435,6 +435,15 @@ public class CollectionSerializers
         return size;
     }
 
+    public static <V, P, L extends List<V>> long serializedListSize(L values, P p, AsymmetricParameterisedUnversionedSerializer<V, P, ?> valueSerializer)
+    {
+        int items = values.size();
+        long size = sizeofUnsignedVInt(items);
+        for (int i = 0 ; i < items ; ++i)
+            size += valueSerializer.serializedSize(values.get(i), p);
+        return size;
+    }
+
     public static <V, P, L extends List<V>, Version> long serializedListSize(L values, P p, Version version, AsymmetricParameterisedVersionedSerializer<V, P, ?, Version> valueSerializer)
     {
         int items = values.size();
@@ -571,7 +580,7 @@ public class CollectionSerializers
         return result;
     }
 
-    private static <V, P, C extends Collection<? super V>, Version> C deserializeCollection(P p, DataInputPlus in, AsymmetricParameterisedUnversionedSerializer<?, P, V> serializer, IntFunction<C> factory) throws IOException
+    private static <V, P, C extends Collection<? super V>> C deserializeCollection(P p, DataInputPlus in, AsymmetricParameterisedUnversionedSerializer<?, P, V> serializer, IntFunction<C> factory) throws IOException
     {
         int size = in.readUnsignedVInt32();
         C result = factory.apply(size);

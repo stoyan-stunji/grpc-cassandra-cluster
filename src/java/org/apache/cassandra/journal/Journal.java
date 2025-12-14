@@ -18,6 +18,7 @@
 package org.apache.cassandra.journal;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.nio.channels.ClosedByInterruptException;
 import java.nio.file.FileStore;
 import java.util.ArrayList;
@@ -29,10 +30,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
-import java.util.function.BooleanSupplier;
-import java.util.function.Function;
-import java.util.function.LongConsumer;
-import java.util.function.Predicate;
+import java.util.function.*;
 import java.util.zip.CRC32;
 
 import com.google.common.annotations.VisibleForTesting;
@@ -52,10 +50,10 @@ import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.io.util.PathUtils;
 import org.apache.cassandra.journal.Segments.ReferencedSegments;
 import org.apache.cassandra.service.StorageService;
+import org.apache.cassandra.utils.AbstractIterator;
 import org.apache.cassandra.utils.CloseableIterator;
 import org.apache.cassandra.utils.Crc;
 import org.apache.cassandra.utils.JVMStabilityInspector;
-import org.apache.cassandra.utils.LazyToString;
 import org.apache.cassandra.utils.MergeIterator;
 import org.apache.cassandra.utils.Simulate;
 import org.apache.cassandra.utils.concurrent.OpOrder;
@@ -116,7 +114,7 @@ public class Journal<K, V> implements Shutdownable
 
     final AtomicReference<State> state = new AtomicReference<>(State.UNINITIALIZED);
 
-    // TODO (required): we do not need wait queues here, we can just wait on a signal on a segment while its byte buffer is being allocated
+    // TODO (expected): we do not need wait queues here, we can just wait on a signal on a segment while its byte buffer is being allocated
     private final WaitQueue segmentPrepared = newWaitQueue();
     private final WaitQueue allocatorThreadWaitQueue = newWaitQueue();
     private final BooleanSupplier allocatorThreadWaitCondition = () -> (availableSegment == null);
@@ -224,6 +222,27 @@ public class Journal<K, V> implements Shutdownable
                               "Unexpected journal state after initialization", state);
         flusher.start();
         compactor.start();
+
+        final int maxSegments = 100;
+        if (segments.get().count(Segment::isStatic) > maxSegments)
+        {
+            while (true)
+            {
+                WaitQueue.Signal signal = compactor.compacted.register();
+                int count = segments.get().count(Segment::isStatic);
+                if (count <= maxSegments)
+                {
+                    signal.cancel();
+                    logger.info("Only {} static segments; continuing with startup", count);
+                    break;
+                }
+                else
+                {
+                    logger.info("Too many ({}) static segments; waiting until some compacted before starting up", count);
+                    signal.awaitThrowUncheckedOnInterrupt();
+                }
+            }
+        }
     }
 
     @VisibleForTesting
@@ -258,6 +277,7 @@ public class Journal<K, V> implements Shutdownable
         {
             Invariants.require(state.compareAndSet(State.NORMAL, State.SHUTDOWN),
                                   "Unexpected journal state while trying to shut down", state);
+            logger.debug("Shutting down " + allocator + " and awaiting termination");
             allocator.shutdown();
             wakeAllocator(); // Wake allocator to force it into shutdown
             // TODO (expected): why are we awaitingTermination here when we have a separate method for it?
@@ -267,6 +287,7 @@ public class Journal<K, V> implements Shutdownable
             compactor.awaitTermination(1, TimeUnit.MINUTES);
             flusher.shutdown();
             closeAllSegments();
+            logger.debug("Shutting down " + releaser + " and " + closer + " and awaiting termination");
             releaser.shutdown();
             closer.shutdown();
             closer.awaitTermination(1, TimeUnit.MINUTES);
@@ -498,10 +519,17 @@ public class Journal<K, V> implements Shutdownable
         }
     }
 
+    // TODO (require): Find a better way to test unwritten allocations and/or corruption
+    @VisibleForTesting
+    public void unsafeConsumeBytesForTesting(int entrySize, Consumer<ByteBuffer> corrupt)
+    {
+        allocate(entrySize).consumeBufferUnsafe(corrupt);
+    }
+
     private ActiveSegment<K, V>.Allocation allocate(int entrySize)
     {
-        ActiveSegment<K, V> segment = currentSegment;
 
+        ActiveSegment<K, V> segment = currentSegment;
         ActiveSegment<K, V>.Allocation alloc;
         while (null == (alloc = segment.allocate(entrySize)))
         {
@@ -861,7 +889,7 @@ public class Journal<K, V> implements Shutdownable
     /**
      * @return true if the invoking thread should continue, or false if it should terminate itself
      */
-    boolean handleError(String message, Throwable t)
+    public boolean handleError(String message, Throwable t)
     {
         Params.FailurePolicy policy = params.failurePolicy();
         JVMStabilityInspector.inspectJournalThrowable(t, name, policy);
@@ -878,6 +906,7 @@ public class Journal<K, V> implements Shutdownable
                 message = format("%s. Journal %s failure policy is %s; terminating thread.", message, name, policy);
                 logger.error(maybeAddDiskSpaceContext(message), t);
                 return false;
+            case ALLOW_UNSAFE_STARTUP:
             case IGNORE:
                 message = format("%s. Journal %s failure policy is %s; ignoring excepton.", message, name, policy);
                 logger.error(maybeAddDiskSpaceContext(message), t);
@@ -928,11 +957,11 @@ public class Journal<K, V> implements Shutdownable
     }
 
     /**
-     * Static segment iterator iterates all keys in _static_ segments in order.
+     * segment iterator iterates all keys in order.
      */
-    public StaticSegmentKeyIterator staticSegmentKeyIterator()
+    public SegmentKeyIterator segmentKeyIterator(K min, K max, Predicate<Segment<?, ?>> include)
     {
-        return new StaticSegmentKeyIterator();
+        return new SegmentKeyIterator(min, max, include);
     }
 
     /**
@@ -940,7 +969,7 @@ public class Journal<K, V> implements Shutdownable
      */
     public static class KeyRefs<K>
     {
-        long segments[];
+        long[] segments;
         K key;
         int size;
 
@@ -954,10 +983,9 @@ public class Journal<K, V> implements Shutdownable
             this.segments = new long[maxSize];
         }
 
-        public void segments(LongConsumer consumer)
+        public long[] copyOfSegments()
         {
-            for (int i = 0; i < size; i++)
-                consumer.accept(segments[i]);
+            return segments == null ? new long[0] : Arrays.copyOf(segments, size);
         }
 
         public K key()
@@ -965,15 +993,16 @@ public class Journal<K, V> implements Shutdownable
             return key;
         }
 
+        public void ensureSorted()
+        {
+            Arrays.sort(segments);
+        }
+
         private void add(K key, long segment)
         {
+            Invariants.require(this.key == null || key.equals(this.key));
             this.key = key;
-            if (size == 0 || segments[size - 1] < segment)
-                segments[size++] = segment;
-            else
-                Invariants.require(segments[size - 1] == segment,
-                                   "Tried to add an out-of-order segment: %d, %s", segment,
-                                   LazyToString.lazy(() -> Arrays.toString(Arrays.copyOf(segments, size))));
+            segments[size++] = segment;
         }
 
         private void reset()
@@ -982,46 +1011,53 @@ public class Journal<K, V> implements Shutdownable
             size = 0;
             Arrays.fill(segments, 0);
         }
+
+        @Override
+        public String toString()
+        {
+            return "KeyRefs{" +
+                   "segments=" + Arrays.toString(segments) +
+                   ", key=" + key +
+                   ", size=" + size +
+                   '}';
+        }
     }
 
-    public class StaticSegmentKeyIterator implements CloseableIterator<KeyRefs<K>>
+    public class SegmentKeyIterator implements CloseableIterator<KeyRefs<K>>
     {
         private final ReferencedSegments<K, V> segments;
         private final MergeIterator<Head, KeyRefs<K>> iterator;
 
-        public StaticSegmentKeyIterator()
+        public SegmentKeyIterator(K min, K max, Predicate<Segment<?, ?>> include)
         {
-            this.segments = selectAndReference(Segment::isStatic);
+            this.segments = selectAndReference(s -> include.test(s) && !s.isEmpty()
+                                                    && (min == null || keySupport.compare(s.index().lastId(), min) >= 0)
+                                                    && (max == null || keySupport.compare(s.index().firstId(), max) <= 0));
             List<Iterator<Head>> iterators = new ArrayList<>(segments.count());
 
             for (Segment<K, V> segment : segments.allSorted(true))
             {
-                StaticSegment<K, V> staticSegment = (StaticSegment<K, V>) segment;
-                Iterator<K> iter = staticSegment.index().reader();
-                Head head = new Head(staticSegment.descriptor.timestamp);
-                iterators.add(new Iterator<>()
+                if (segment.isStatic())
                 {
-                    public boolean hasNext()
-                    {
-                        return iter.hasNext();
-                    }
-
-                    public Head next()
-                    {
-                        head.key = iter.next();
-                        return head;
-                    }
-                });
+                    final StaticSegment<K, V> staticSegment = (StaticSegment<K, V>) segment;
+                    final OnDiskIndex<K>.IndexReader iter = staticSegment.index().reader();
+                    if (min != null) iter.seek(min);
+                    if (max != null) iter.seekEnd(max);
+                    if (iter.hasNext())
+                        iterators.add(keyIterator(segment.descriptor.timestamp, iter));
+                }
+                else
+                {
+                    final ActiveSegment<K, V> activeSegment = (ActiveSegment<K, V>) segment;
+                    final Iterator<K> iter = activeSegment.index().keyIterator(min, max);
+                    if (iter.hasNext())
+                        iterators.add(keyIterator(segment.descriptor.timestamp, iter));
+                }
             }
 
             this.iterator = MergeIterator.get(iterators,
-                                              (r1, r2) -> {
-                                                  int keyCmp = keySupport.compare(r1.key, r2.key);
-                                                  if (keyCmp != 0)
-                                                      return keyCmp;
-                                                  return Long.compare(r1.segment, r2.segment);
-                                              },
-                                              new MergeIterator.Reducer<Head, KeyRefs<K>>()
+                                              (r1, r2) -> keySupport.compare(r1.key, r2.key),
+                                              new MergeIterator.Reducer<>()
                                               {
                                                   final KeyRefs<K> ret = new KeyRefs<>(segments.count());
 
@@ -1034,6 +1070,7 @@ public class Journal<K, V> implements Shutdownable
                                                   @Override
                                                   protected KeyRefs<K> getReduced()
                                                   {
+                                                      ret.ensureSorted();
                                                       return ret;
                                                   }
 
@@ -1044,6 +1081,34 @@ public class Journal<K, V> implements Shutdownable
                                                       super.onKeyChange();
                                                   }
                                               });
+        }
+
+        private Iterator<Head> keyIterator(long segment, Iterator<K> iter)
+        {
+            final Head head = new Head(segment);
+            return new AbstractIterator<>()
+            {
+                @Override
+                protected Head computeNext()
+                {
+                    if (!iter.hasNext())
+                        return endOfData();
+
+                    K next = iter.next();
+                    while (next.equals(head.key))
+                    {
+                        if (!iter.hasNext())
+                            return endOfData();
+
+                        next = iter.next();
+                    }
+
+                    Invariants.require(!next.equals(head.key),
+                                       "%s == %s", next, head.key);
+                    head.key = next;
+                    return head;
+                }
+            };
         }
 
         @Override

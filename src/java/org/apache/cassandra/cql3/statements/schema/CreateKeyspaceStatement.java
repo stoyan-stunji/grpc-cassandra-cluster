@@ -37,6 +37,7 @@ import org.apache.cassandra.schema.KeyspaceParams.Option;
 import org.apache.cassandra.schema.Keyspaces.KeyspacesDiff;
 import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.tcm.ClusterMetadata;
+import org.apache.cassandra.tcm.serialization.Version;
 import org.apache.cassandra.transport.Event.SchemaChange;
 import org.apache.cassandra.transport.Event.SchemaChange.Change;
 
@@ -62,6 +63,12 @@ public final class CreateKeyspaceStatement extends AlterSchemaStatement
     }
 
     @Override
+    public boolean compatibleWith(ClusterMetadata metadata)
+    {
+        return metadata.directory.commonSerializationVersion.isAtLeast(Version.V0);
+    }
+
+    @Override
     public Keyspaces apply(ClusterMetadata metadata)
     {
         attrs.validate();
@@ -81,7 +88,13 @@ public final class CreateKeyspaceStatement extends AlterSchemaStatement
             throw new AlreadyExistsException(keyspaceName);
         }
 
-        KeyspaceMetadata keyspaceMetadata = KeyspaceMetadata.create(keyspaceName, attrs.asNewKeyspaceParams());
+        // we deduplicate ReplicationParams here to use the same objects in KeyspaceMetadata
+        // as we have as keys in metadata.placements to have a fast map lookup
+        // ReplicationParams are immutable, so it is a safe optimization
+        KeyspaceParams keyspaceParams = attrs.asNewKeyspaceParams();
+        ReplicationParams replicationParams = metadata.placements.deduplicateReplicationParams(keyspaceParams.replication);
+        keyspaceParams = keyspaceParams.withSwapped(replicationParams);
+        KeyspaceMetadata keyspaceMetadata = KeyspaceMetadata.create(keyspaceName, keyspaceParams);
 
         if (keyspaceMetadata.params.replication.klass.equals(LocalStrategy.class))
             throw ire("Unable to use given strategy class: LocalStrategy is reserved for internal use.");
@@ -131,6 +144,8 @@ public final class CreateKeyspaceStatement extends AlterSchemaStatement
 
         // Guardrail on number of keyspaces
         Guardrails.keyspaces.guard(Schema.instance.getUserKeyspaces().size() + 1, keyspaceName, false, state);
+
+        Guardrails.keyspaceProperties.guard(attrs.updatedProperties(), attrs::removeProperty, state);
     }
 
     public static final class Raw extends CQLStatement.Raw

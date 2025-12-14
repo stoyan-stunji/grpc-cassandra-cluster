@@ -183,7 +183,8 @@ public class CustomCassandraIndex implements Index
         indexCfs = ColumnFamilyStore.createColumnFamilyStore(baseCfs.keyspace,
                                                              cfm.name,
                                                              cfm.ref.get(),
-                                                             baseCfs.getTracker().loadsstables);
+                                                             baseCfs.getTracker().loadsstables,
+                                                             false);
         indexedColumn = target.left;
     }
 
@@ -214,11 +215,6 @@ public class CustomCassandraIndex implements Index
     public AbstractType<?> customExpressionValueType()
     {
         return null;
-    }
-
-    private boolean supportsExpression(RowFilter.Expression expression)
-    {
-        return supportsExpression(expression.column(), expression.operator());
     }
 
     public long getEstimatedResultRows()

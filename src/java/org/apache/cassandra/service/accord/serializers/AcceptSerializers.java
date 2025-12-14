@@ -54,7 +54,7 @@ public class AcceptSerializers
             out.writeByte((accept.kind.ordinal() << 1) | (accept.isPartialAccept ? IS_PARTIAL : 0));
             CommandSerializers.ballot.serialize(accept.ballot, out);
             ExecuteAtSerializer.serialize(accept.txnId, accept.executeAt, out);
-            DepsSerializers.partialDeps.serialize(accept.partialDeps, out);
+            DepsSerializers.partialDeps.serialize(accept.partialDeps(), out);
         }
 
         @Override
@@ -76,7 +76,7 @@ public class AcceptSerializers
             return 1
                    + CommandSerializers.ballot.serializedSize(accept.ballot)
                    + ExecuteAtSerializer.serializedSize(accept.txnId, accept.executeAt)
-                   + DepsSerializers.partialDeps.serializedSize(accept.partialDeps);
+                   + DepsSerializers.partialDeps.serializedSize(accept.partialDeps());
         }
     }
 
@@ -88,7 +88,7 @@ public class AcceptSerializers
             CommandSerializers.status.serialize(invalidate.status, out);
             CommandSerializers.ballot.serialize(invalidate.ballot, out);
             CommandSerializers.txnId.serialize(invalidate.txnId, out);
-            KeySerializers.participants.serialize(invalidate.participants, out);
+            KeySerializers.participants.serialize(invalidate.scope, out);
         }
 
         @Override
@@ -106,7 +106,7 @@ public class AcceptSerializers
             return CommandSerializers.status.serializedSize(invalidate.status)
                    + CommandSerializers.ballot.serializedSize(invalidate.ballot)
                    + CommandSerializers.txnId.serializedSize(invalidate.txnId)
-                   + KeySerializers.participants.serializedSize(invalidate.participants);
+                   + KeySerializers.participants.serializedSize(invalidate.scope);
         }
     };
 

@@ -51,6 +51,7 @@ import com.google.common.annotations.VisibleForTesting;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import accord.utils.Invariants;
 import io.netty.util.concurrent.GlobalEventExecutor;
 import org.apache.cassandra.Util;
 import org.apache.cassandra.audit.AuditLogManager;
@@ -64,6 +65,7 @@ import org.apache.cassandra.concurrent.NamedThreadFactory;
 import org.apache.cassandra.concurrent.ScheduledExecutors;
 import org.apache.cassandra.concurrent.SharedExecutorPool;
 import org.apache.cassandra.concurrent.Stage;
+import org.apache.cassandra.config.CassandraRelevantProperties;
 import org.apache.cassandra.config.Config;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.DurationSpec;
@@ -116,6 +118,7 @@ import org.apache.cassandra.io.util.PathUtils;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.metrics.CassandraMetricsRegistry;
 import org.apache.cassandra.metrics.Sampler;
+import org.apache.cassandra.metrics.ThreadLocalMetrics;
 import org.apache.cassandra.net.Message;
 import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.net.NoPayload;
@@ -535,8 +538,9 @@ public class Instance extends IsolatedExecutor implements IInvokableInstance
         return runOnCaller -> {
             if (!internodeMessagingStarted)
             {
-                inInstancelogger.debug("Dropping inbound message {} to {} as internode messaging has not been started yet",
-                             message, config().broadcastAddress());
+                if (inInstancelogger != null)
+                    inInstancelogger.debug("Dropping inbound message {} to {} as internode messaging has not been started yet",
+                            message, config().broadcastAddress());
                 return;
             }
             if (message.version() > MessagingService.current_version)
@@ -757,8 +761,6 @@ public class Instance extends IsolatedExecutor implements IInvokableInstance
             CONSISTENT_SIMULTANEOUS_MOVES_ALLOW.setBoolean(true);
         }
 
-        mkdirs();
-
         assert config.networkTopology().contains(config.broadcastAddress()) : String.format("Network topology %s doesn't contain the address %s",
                                                                                             config.networkTopology(), config.broadcastAddress());
         DistributedTestInitialLocationProvider.assign(config.networkTopology());
@@ -772,7 +774,6 @@ public class Instance extends IsolatedExecutor implements IInvokableInstance
         Config.log(DatabaseDescriptor.getRawConfig());
 
         DiskErrorsHandlerService.configure();
-        DatabaseDescriptor.createAllDirectories();
         CassandraDaemon.getInstanceForTesting().migrateSystemDataIfNeeded();
 
         CommitLog.instance.start();
@@ -823,6 +824,9 @@ public class Instance extends IsolatedExecutor implements IInvokableInstance
         try
         {
             CommitLog.instance.recoverSegmentsOnDisk();
+            NodeId self = ClusterMetadata.current().myNodeId();
+            if (self != null)
+                AccordService.localStartup(self);
         }
         catch (IOException e)
         {
@@ -846,7 +850,6 @@ public class Instance extends IsolatedExecutor implements IInvokableInstance
         JVMStabilityInspector.replaceKiller(new InstanceKiller(Instance.this::shutdown));
 
         StorageService.instance.registerDaemon(CassandraDaemon.getInstanceForTesting());
-
         if (config.has(GOSSIP))
         {
             try
@@ -870,7 +873,10 @@ public class Instance extends IsolatedExecutor implements IInvokableInstance
             ClusterMetadataService.instance().processor().fetchLogAndWait();
             NodeId self = Register.maybeRegister();
             RegistrationStatus.instance.onRegistration();
-            AccordService.startup(self);
+            if (!AccordService.isSetupOrStarting())
+                AccordService.localStartup(self);
+            AccordService.distributedStartup();
+
             boolean joinRing = config.get(Constants.KEY_DTEST_JOIN_RING) == null || (boolean) config.get(Constants.KEY_DTEST_JOIN_RING);
             if (ClusterMetadata.current().directory.peerState(self) != NodeState.JOINED && joinRing)
             {
@@ -920,15 +926,6 @@ public class Instance extends IsolatedExecutor implements IInvokableInstance
         sync(() ->
             StorageService.instance.doAuthSetup(false)
         ).run();
-    }
-
-    protected void mkdirs()
-    {
-        new File(config.getString("saved_caches_directory")).tryCreateDirectories();
-        new File(config.getString("hints_directory")).tryCreateDirectories();
-        new File(config.getString("commitlog_directory")).tryCreateDirectories();
-        for (String dir : (String[]) config.get("data_file_directories"))
-            new File(dir).tryCreateDirectories();
     }
 
     private Config loadConfig(IInstanceConfig overrides)
@@ -1021,7 +1018,8 @@ public class Instance extends IsolatedExecutor implements IInvokableInstance
                                 () -> EpochAwareDebounce.instance.close(),
                                 SnapshotManager.instance::close,
                                 () -> IndexStatusManager.instance.shutdownAndWait(1L, MINUTES),
-                                DiskErrorsHandlerService::close
+                                DiskErrorsHandlerService::close,
+                                () -> ThreadLocalMetrics.shutdownCleaner(1L, MINUTES)
             );
 
             internodeMessagingStarted = false;
@@ -1038,8 +1036,8 @@ public class Instance extends IsolatedExecutor implements IInvokableInstance
             );
 
             error = parallelRun(error, executor, () -> {
-                if (!AccordService.isSetup()) return;
-                AccordService.instance().shutdownAndWait(1l, MINUTES);
+                if (AccordService.isSetupOrStarting())
+                    AccordService.unsafeInstance().shutdownAndWait(1L, MINUTES);
             });
 
             // CommitLog must shut down after Stage, or threads from the latter may attempt to use the former.
@@ -1074,6 +1072,10 @@ public class Instance extends IsolatedExecutor implements IInvokableInstance
             try
             {
                 future.get();
+                ThreadGroup group = Thread.currentThread().getThreadGroup();
+                int active = group.activeCount();
+                Invariants.expect(group.getParent().activeCount() <= active
+                                  || CassandraRelevantProperties.DTEST_IGNORE_SHUTDOWN_THREADCOUNT.getBoolean());
                 return null;
             }
             finally
@@ -1207,7 +1209,7 @@ public class Instance extends IsolatedExecutor implements IInvokableInstance
 
         public DTestNodeTool(boolean withNotifications, Output output)
         {
-            super(new InternalNodeProbeFactory(withNotifications), output);
+            super(new InternalNodeProbeFactory(withNotifications, output), output);
             internalNodeProbe = new InternalNodeProbe(withNotifications);
             storageProxy = internalNodeProbe.getStorageService();
             storageProxy.addNotificationListener(notifications, null, null);

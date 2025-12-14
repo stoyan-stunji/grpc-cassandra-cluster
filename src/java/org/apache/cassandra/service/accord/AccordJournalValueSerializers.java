@@ -36,9 +36,6 @@ import org.apache.cassandra.service.accord.serializers.Version;
 
 import static accord.local.CommandStores.RangesForEpoch;
 
-// TODO (required): test with large collection values, and perhaps split out some fields if they have a tendency to grow larger
-// TODO (required): alert on metadata size
-// TODO (required): versioning
 public class AccordJournalValueSerializers
 {
     public interface FlyweightImage
@@ -55,6 +52,13 @@ public class AccordJournalValueSerializers
         void reserialize(JournalKey key, IMAGE from, DataOutputPlus out, Version userVersion) throws IOException;
 
         void deserialize(JournalKey key, IMAGE into, DataInputPlus in, Version userVersion) throws IOException;
+
+        default IMAGE deserialize(JournalKey key, DataInputPlus in, Version userVersion) throws IOException
+        {
+            IMAGE image = mergerFor();
+            deserialize(key, image, in, userVersion);
+            return image;
+        }
     }
 
     public static class CommandDiffSerializer
@@ -104,7 +108,7 @@ public class AccordJournalValueSerializers
             this.accumulated = initial;
         }
 
-        protected void update(V newValue)
+        public void update(V newValue)
         {
             accumulated = accumulate(accumulated, newValue);
         }
@@ -141,6 +145,14 @@ public class AccordJournalValueSerializers
                 return oldValue;
             hasRead = true;
             return newValue;
+        }
+
+        @Override
+        public String toString()
+        {
+            return "IdentityAccumulator{" +
+                   initial +
+                   '}';
         }
     }
 
@@ -240,8 +252,6 @@ public class AccordJournalValueSerializers
         @Override
         public void deserialize(JournalKey journalKey, DurableBeforeAccumulator into, DataInputPlus in, Version userVersion) throws IOException
         {
-            // TODO: maybe using local serializer is not the best call here, but how do we distinguish
-            // between messaging and disk versioning?
             into.update(CommandStoreSerializers.durableBefore.deserialize(in));
         }
     }

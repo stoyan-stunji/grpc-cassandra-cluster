@@ -21,6 +21,7 @@ package org.apache.cassandra.service.accord;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.Set;
+import java.util.concurrent.TimeoutException;
 import java.util.function.BiConsumer;
 import javax.annotation.Nullable;
 
@@ -31,19 +32,24 @@ import accord.coordinate.CoordinationFailed;
 import accord.coordinate.Exhausted;
 import accord.coordinate.Preempted;
 import accord.coordinate.Timeout;
-import accord.coordinate.TopologyMismatch;
 import accord.primitives.Seekable;
 import accord.primitives.Seekables;
 import accord.primitives.TxnId;
+import accord.topology.TopologyMismatch;
 import accord.utils.UnhandledEnum;
 import org.apache.cassandra.exceptions.InvalidRequestException;
+import org.apache.cassandra.exceptions.ReadFailureException;
+import org.apache.cassandra.exceptions.ReadTimeoutException;
 import org.apache.cassandra.exceptions.RequestExecutionException;
+import org.apache.cassandra.exceptions.RequestFailureException;
+import org.apache.cassandra.exceptions.RequestTimeoutException;
 import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.schema.TableId;
 import org.apache.cassandra.service.accord.api.AccordAgent;
 import org.apache.cassandra.service.accord.api.PartitionKey;
 import org.apache.cassandra.service.accord.txn.RetryWithNewProtocolResult;
 import org.apache.cassandra.tracing.Tracing;
+import org.apache.cassandra.utils.JVMStabilityInspector;
 import org.apache.cassandra.utils.concurrent.AsyncFuture;
 
 import static org.apache.cassandra.utils.Clock.Global.nanoTime;
@@ -74,11 +80,11 @@ public class AccordResult<V> extends AsyncFuture<V> implements BiConsumer<V, Thr
         try
         {
             if (!awaitUntil(deadlineAtNanos))
-                accept(null, new Timeout(txnId, null));
+                tryFailure(new TimeoutException());
         }
         catch (InterruptedException e)
         {
-            accept(null, e);
+            tryFailure(e);
         }
 
         Throwable fail = fail();
@@ -87,76 +93,135 @@ public class AccordResult<V> extends AsyncFuture<V> implements BiConsumer<V, Thr
         return success();
     }
 
-    @Override
-    public void accept(V success, Throwable fail)
+    /*
+     * Interop execution with AccordInteropExecution can throw a bunch of C* read not Accord errors
+     * that we want to preserve and make the top level exception here.
+     */
+    private static Throwable maybeWrappedInRequestFailureException(Timeout timeout)
     {
-        if (fail != null)
+        Throwable toCheck = timeout;
+        do
         {
-            RequestExecutionException report;
-            CoordinationFailed coordinationFailed = findCoordinationFailed(fail);
-            TxnId txnId = this.txnId;
-            if (coordinationFailed != null)
+            if (toCheck instanceof ReadTimeoutException)
             {
-                if (txnId == null && coordinationFailed.txnId() != null)
-                    txnId = coordinationFailed.txnId();
+                ReadTimeoutException rte = (ReadTimeoutException) toCheck;
+                return new ReadTimeoutException(rte.consistency, rte.received, rte.blockFor, rte.dataPresent, timeout);
+            }
+            else if (toCheck instanceof ReadFailureException)
+            {
+                ReadFailureException rfe = (ReadFailureException) toCheck;
+                return new ReadFailureException(rfe.getMessage(), rfe.consistency, rfe.received, rfe.blockFor, rfe.dataPresent, rfe.failureReasonByEndpoint, timeout);
+            }
+        } while ((toCheck = toCheck.getCause()) != null);
+        return timeout;
+    }
 
-                if (coordinationFailed instanceof Timeout)
+    public boolean tryFailure(Throwable fail)
+    {
+        // TODO (expected): increment counters after super.tryFailure
+        if (isDone())
+            return false;
+
+        RequestExecutionException report;
+        CoordinationFailed coordinationFailed = findCoordinationFailed(fail);
+        TxnId txnId = this.txnId;
+        if (coordinationFailed != null)
+        {
+            if (txnId == null && coordinationFailed.txnId() != null)
+                txnId = coordinationFailed.txnId();
+
+            if (coordinationFailed instanceof Timeout)
+            {
+                // Preserve the interop execution created exception if there is one
+                Throwable maybeWrappedInRequestFailureException = maybeWrappedInRequestFailureException((Timeout)coordinationFailed);
+                if (maybeWrappedInRequestFailureException instanceof RequestFailureException)
                 {
-                    report = bookkeeping.newTimeout(txnId, keysOrRanges);
-                }
-                else if (coordinationFailed instanceof Preempted)
-                {
-                    report = bookkeeping.newPreempted(txnId, keysOrRanges);
-                }
-                else if (coordinationFailed instanceof Exhausted)
-                {
-                    report = bookkeeping.newExhausted(txnId, keysOrRanges);
-                }
-                else if (isTxnRequest && coordinationFailed instanceof TopologyMismatch)
-                {
-                    // Excluding bugs topology mismatch can occur because a table was dropped in between creating the txn
-                    // and executing it.
-                    // It could also race with the table stopping/starting being managed by Accord.
-                    // The caller can retry if the table indeed exists and is managed by Accord.
-                    Set<TableId> txnDroppedTables = txnDroppedTables(keysOrRanges);
-                    Tracing.trace("Accord returned topology mismatch: " + coordinationFailed.getMessage());
-                    logger.debug("Accord returned topology mismatch", coordinationFailed);
-                    bookkeeping.markTopologyMismatch();
-                    // Throw IRE in case the caller fails to check if the table still exists
-                    if (!txnDroppedTables.isEmpty())
-                    {
-                        Tracing.trace("Accord txn uses dropped tables {}", txnDroppedTables);
-                        logger.debug("Accord txn uses dropped tables {}", txnDroppedTables);
-                        throw new InvalidRequestException("Accord transaction uses dropped tables");
-                    }
-                    trySuccess((V) RetryWithNewProtocolResult.instance);
-                    return;
+                    bookkeeping.newTimeout(txnId, keysOrRanges);
+                    report = (RequestFailureException)maybeWrappedInRequestFailureException;
                 }
                 else
                 {
-                    report = bookkeeping.newFailed(txnId, keysOrRanges);
+                    report = bookkeeping.newTimeout(txnId, keysOrRanges);
                 }
-                    // this case happens when a non-timeout exception is seen, and we are unable to move forward
-                if (txnId != null && txnId.isSyncPoint())
-                    AccordAgent.onFailedBarrier(txnId, fail);
+            }
+            else if (coordinationFailed instanceof Preempted)
+            {
+                report = bookkeeping.newPreempted(txnId, keysOrRanges);
+            }
+            else if (coordinationFailed instanceof Exhausted)
+            {
+                report = bookkeeping.newExhausted(txnId, keysOrRanges);
+            }
+            else if (fail instanceof TimeoutException)
+            {
+                report = bookkeeping.newTimeout(txnId, keysOrRanges);
             }
             else
             {
                 report = bookkeeping.newFailed(txnId, keysOrRanges);
             }
-            report.addSuppressed(fail);
-            tryFailure(report);
+            // this case happens when a non-timeout exception is seen, and we are unable to move forward
+            if (txnId != null && txnId.isSyncPoint())
+                AccordAgent.onFailedBarrier(txnId, fail);
+        }
+        else if (isTxnRequest && fail instanceof TopologyMismatch)
+        {
+            // Excluding bugs topology mismatch can occur because a table was dropped in between creating the txn
+            // and executing it.
+            // It could also race with the table stopping/starting being managed by Accord.
+            // The caller can retry if the table indeed exists and is managed by Accord.
+            Set<TableId> txnDroppedTables = txnDroppedTables(keysOrRanges);
+            Tracing.trace("Accord returned topology mismatch: " + fail.getMessage());
+            logger.debug("Accord returned topology mismatch", fail);
+            bookkeeping.markTopologyMismatch();
+            // Throw IRE in case the caller fails to check if the table still exists
+            if (!txnDroppedTables.isEmpty())
+            {
+                Tracing.trace("Accord txn uses dropped tables {}", txnDroppedTables);
+                logger.debug("Accord txn uses dropped tables {}", txnDroppedTables);
+                throw new InvalidRequestException("Accord transaction uses dropped tables");
+            }
+            trySuccess((V) RetryWithNewProtocolResult.instance);
+            return false;
+        }
+        else if (fail instanceof RequestTimeoutException || fail instanceof TimeoutException)
+        {
+            report = bookkeeping.newTimeout(txnId, keysOrRanges);
         }
         else
         {
-            if (success == RetryWithNewProtocolResult.instance)
-            {
-                bookkeeping.markRetryDifferentSystem();
-                Tracing.trace("Got retry different system error from Accord, will retry");
-            }
-            trySuccess(success);
+            logger.error("Unexpected exception", fail);
+            JVMStabilityInspector.inspectThrowable(fail);
+            report = bookkeeping.newFailed(txnId, keysOrRanges);
         }
+        report.addSuppressed(fail);
+        if (!super.tryFailure(report))
+            return false;
+
         bookkeeping.markElapsedNanos(nanoTime() - startedAtNanos);
+        return true;
+    }
+
+    @Override
+    protected boolean trySuccess(V success)
+    {
+        if (!super.trySuccess(success))
+            return false;
+
+        bookkeeping.markElapsedNanos(nanoTime() - startedAtNanos);
+        if (success == RetryWithNewProtocolResult.instance)
+        {
+            bookkeeping.markRetryDifferentSystem();
+            Tracing.trace("Got retry different system error from Accord, will retry");
+        }
+        return true;
+    }
+
+    @Override
+    public void accept(V success, Throwable fail)
+    {
+        if (fail == null) trySuccess(success);
+        else tryFailure(fail);
     }
 
     @Override
@@ -165,7 +230,7 @@ public class AccordResult<V> extends AsyncFuture<V> implements BiConsumer<V, Thr
         if (super.awaitUntil(nanoTimeDeadline))
             return true;
 
-        accept(null, new Timeout(null, null));
+        tryFailure(new TimeoutException());
         return false;
     }
 

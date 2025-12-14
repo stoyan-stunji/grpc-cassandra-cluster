@@ -247,6 +247,11 @@ public class RetryStrategy implements WaitStrategy
         return units.convert(result, MICROSECONDS);
     }
 
+    public long computeMaxWait(int attempt, TimeUnit units)
+    {
+        return units.convert(max.getMaxMicros(attempt), MICROSECONDS);
+    }
+
     public static RetryStrategy parse(String spec, LatencySourceFactory latencies)
     {
         return parse(spec, latencies, null);
@@ -271,6 +276,13 @@ public class RetryStrategy implements WaitStrategy
                     default: throw new IllegalArgumentException("Invalid modifier specification: unrecognised property '" + key + '\'');
                     case "retries":
                         retries = Integer.parseInt(value);
+                        if (retries < 0)
+                            throw new IllegalArgumentException("retries must be non-negative (retries=" + value + " supplied)");
+                        break;
+                    case "attempts":
+                        retries = Integer.parseInt(value);
+                        if (retries < 0)
+                            throw new IllegalArgumentException("Must permit at least one attempt (attempts=" + value + " supplied)");
                         break;
                     case "rnd":
                         if (randomizer != null)

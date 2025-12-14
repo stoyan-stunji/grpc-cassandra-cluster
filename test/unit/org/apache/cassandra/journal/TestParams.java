@@ -32,6 +32,12 @@ public class TestParams implements Params
     }
 
     @Override
+    public int compactMaxSegments()
+    {
+        return 16;
+    }
+
+    @Override
     public FailurePolicy failurePolicy()
     {
         return FailurePolicy.STOP;
@@ -41,6 +47,12 @@ public class TestParams implements Params
     public FlushMode flushMode()
     {
         return FlushMode.GROUP;
+    }
+
+    @Override
+    public ReplayMode replayMode()
+    {
+        return null;
     }
 
     @Override

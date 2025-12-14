@@ -21,7 +21,6 @@ package org.apache.cassandra.tcm;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -39,6 +38,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import accord.local.Node;
+import accord.utils.SortedArrays.SortedArrayList;
 import org.apache.cassandra.config.CassandraRelevantProperties;
 import org.apache.cassandra.db.TypeSizes;
 import org.apache.cassandra.dht.IPartitioner;
@@ -55,6 +55,7 @@ import org.apache.cassandra.locator.Replica;
 import org.apache.cassandra.net.CMSIdentifierMismatchException;
 import org.apache.cassandra.schema.DistributedSchema;
 import org.apache.cassandra.schema.KeyspaceMetadata;
+import org.apache.cassandra.schema.KeyspaceParams;
 import org.apache.cassandra.schema.Keyspaces;
 import org.apache.cassandra.schema.ReplicationParams;
 import org.apache.cassandra.schema.TableId;
@@ -461,8 +462,8 @@ public class ClusterMetadata
                 tokenMap = tokenMap.unassignTokens(nodeId);
 
             Node.Id accordId = AccordTopology.tcmIdToAccord(nodeId);
-            if (accordStaleReplicas.contains(accordId))
-                accordStaleReplicas = accordStaleReplicas.without(Collections.singleton(accordId));
+            if (accordStaleReplicas.stale().contains(accordId))
+                accordStaleReplicas = accordStaleReplicas.withoutStale(SortedArrayList.ofSorted(accordId));
 
             return this;
         }
@@ -479,9 +480,10 @@ public class ClusterMetadata
             return this;
         }
 
-        public Transformer register(NodeId nodeId, NodeAddresses addresses, Location location, NodeVersion version)
+        @VisibleForTesting
+        public Transformer unsafeRegisterForTesting(NodeId nodeId, NodeAddresses addresses, Location location, NodeVersion version)
         {
-            directory = directory.with(nodeId, addresses, location, version);
+            directory = directory.unsafeWithNodeForTesting(nodeId, addresses, location, version);
             return this;
         }
 
@@ -533,8 +535,8 @@ public class ClusterMetadata
                                  .withNodeState(replacement, NodeState.JOINED);
 
             Node.Id accordId = AccordTopology.tcmIdToAccord(replaced);
-            if (accordStaleReplicas.contains(accordId))
-                accordStaleReplicas = accordStaleReplicas.without(Collections.singleton(accordId));
+            if (accordStaleReplicas.stale().contains(accordId))
+                accordStaleReplicas = accordStaleReplicas.withoutStale(SortedArrayList.ofSorted(accordId));
 
             return this;
         }
@@ -565,15 +567,21 @@ public class ClusterMetadata
             return this;
         }
         
-        public Transformer markStaleReplicas(Set<Node.Id> ids)
+        public Transformer markStaleReplicas(SortedArrayList<Node.Id> markStale)
         {
-            accordStaleReplicas = accordStaleReplicas.withNodeIds(ids);
+            accordStaleReplicas = accordStaleReplicas.withStale(markStale);
             return this;
         }
 
-        public Transformer unmarkStaleReplicas(Set<Node.Id> ids)
+        public Transformer markHardRemovedReplicas(SortedArrayList<Node.Id> markHardRemoved)
         {
-            accordStaleReplicas = accordStaleReplicas.without(ids);
+            accordStaleReplicas = accordStaleReplicas.withHardRemoved(markHardRemoved);
+            return this;
+        }
+
+        public Transformer unmarkStaleReplicas(SortedArrayList<Node.Id> unmarkStale)
+        {
+            accordStaleReplicas = accordStaleReplicas.withoutStale(unmarkStale);
             return this;
         }
 
@@ -997,7 +1005,7 @@ public class ClusterMetadata
 
     public boolean metadataSerializationUpgradeInProgress()
     {
-        return !directory.clusterMaxVersion.serializationVersion().equals(directory.clusterMinVersion.serializationVersion());
+        return !directory.clusterMaxVersion.serializationVersion().equals(directory.commonSerializationVersion);
     }
 
     public static class Serializer implements MetadataSerializer<ClusterMetadata>
@@ -1064,6 +1072,8 @@ public class ClusterMetadata
             TokenMap tokenMap = TokenMap.serializer.deserialize(in, version);
             DataPlacements placements = DataPlacements.serializer.deserialize(in, version);
 
+            schema = deduplicateReplicationParams(schema, placements);
+
             AccordFastPath accordFastPath;
             ConsensusMigrationState consensusMigrationState;
             AccordStaleReplicas staleReplicas;
@@ -1105,6 +1115,23 @@ public class ClusterMetadata
                                        consensusMigrationState,
                                        extensions,
                                        staleReplicas);
+        }
+
+        private DistributedSchema deduplicateReplicationParams(DistributedSchema schema, DataPlacements placements)
+        {
+            Keyspaces newKeyspaces = schema.getKeyspaces();
+            for (KeyspaceMetadata keyspaceMetadata : schema.getKeyspaces())
+            {
+                KeyspaceParams params = keyspaceMetadata.params;
+                ReplicationParams newReplicationParams = placements.deduplicateReplicationParams(params.replication);
+                if (newReplicationParams != params.replication)
+                {
+                    KeyspaceParams newKeyspaceParams = params.withSwapped(newReplicationParams);
+                    KeyspaceMetadata newKeyspaceMetadata = keyspaceMetadata.withSwapped(newKeyspaceParams);
+                    newKeyspaces = newKeyspaces.withAddedOrUpdated(newKeyspaceMetadata);
+                }
+            }
+            return new DistributedSchema(newKeyspaces, schema.lastModified());
         }
 
         @Override

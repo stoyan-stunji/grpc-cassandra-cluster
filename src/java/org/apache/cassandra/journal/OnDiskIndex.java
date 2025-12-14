@@ -33,6 +33,7 @@ import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.utils.AbstractIterator;
 import org.apache.cassandra.utils.Crc;
+import org.apache.cassandra.utils.memory.MemoryUtil;
 
 import static org.apache.cassandra.journal.Journal.validateCRC;
 import static org.apache.cassandra.utils.FBUtilities.updateChecksumInt;
@@ -97,7 +98,7 @@ final class OnDiskIndex<K> extends Index<K>
         }
         catch (Throwable e)
         {
-            FileUtils.clean(buffer);
+            MemoryUtil.clean(buffer);
             FileUtils.closeQuietly(channel);
             throw new JournalReadError(descriptor, file, e);
         }
@@ -117,7 +118,7 @@ final class OnDiskIndex<K> extends Index<K>
     {
         try
         {
-            FileUtils.clean(buffer);
+            MemoryUtil.clean(buffer);
             buffer = null;
             channel.close();
         }
@@ -198,6 +199,11 @@ final class OnDiskIndex<K> extends Index<K>
         return lastId;
     }
 
+    public int entryCount()
+    {
+        return entryCount;
+    }
+
     @Override
     public long[] lookUp(K id)
     {
@@ -246,6 +252,7 @@ final class OnDiskIndex<K> extends Index<K>
 
     public class IndexReader extends AbstractIterator<K>
     {
+        int lastIdx = entryCount - 1;
         int idx;
         K key;
         int offset;
@@ -254,6 +261,20 @@ final class OnDiskIndex<K> extends Index<K>
         IndexReader()
         {
             idx = -1;
+        }
+
+        public void seek(K key)
+        {
+            int i = binarySearch(key);
+            if (i < 0) i = -1 - i;
+            idx = i - 1;
+        }
+
+        public void seekEnd(K key)
+        {
+            int i = binarySearch(key);
+            if (i < 0) i = -2 - i;
+            lastIdx = i;
         }
 
         protected K computeNext()
@@ -278,7 +299,7 @@ final class OnDiskIndex<K> extends Index<K>
 
         public boolean advance()
         {
-            if (idx >= entryCount - 1)
+            if (idx >= lastIdx)
                 return false;
 
             idx++;

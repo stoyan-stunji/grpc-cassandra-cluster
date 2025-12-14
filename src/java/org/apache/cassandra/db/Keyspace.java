@@ -25,6 +25,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicLong;
@@ -255,10 +256,10 @@ public class Keyspace
 
     private Keyspace(String keyspaceName, SchemaProvider schema, boolean loadSSTables)
     {
-        this(schema,  schema.getKeyspaceMetadata(keyspaceName), loadSSTables);
+        this(schema,  schema.getKeyspaceMetadata(keyspaceName), loadSSTables, true);
     }
 
-    public Keyspace(SchemaProvider schema, KeyspaceMetadata metadata, boolean loadSSTables)
+    public Keyspace(SchemaProvider schema, KeyspaceMetadata metadata, boolean loadSSTables, boolean addIndexes)
     {
         this.schema = schema;
         this.name = metadata.name;
@@ -275,7 +276,7 @@ public class Keyspace
         for (TableMetadata cfm : metadata.tablesAndViews())
         {
             logger.trace("Initializing {}.{}", getName(), cfm.name);
-            initCf(cfm, loadSSTables);
+            initCf(cfm, loadSSTables, addIndexes);
         }
 
         this.viewManager.reload(metadata);
@@ -367,7 +368,7 @@ public class Keyspace
     /**
      * adds a cf to internal structures, ends up creating disk files).
      */
-    public void initCf(TableMetadata metadata, boolean loadSSTables)
+    public void initCf(TableMetadata metadata, boolean loadSSTables, boolean addIndexes)
     {
         ColumnFamilyStore cfs = columnFamilyStores.get(metadata.id);
 
@@ -377,7 +378,7 @@ public class Keyspace
             // We don't worry about races here; startup is safe, and adding multiple idential CFs
             // simultaneously is a "don't do that" scenario.
             ColumnFamilyStore oldCfs = columnFamilyStores.putIfAbsent(metadata.id,
-                                                                      ColumnFamilyStore.createColumnFamilyStore(this, metadata, loadSSTables));
+                                                                      ColumnFamilyStore.createColumnFamilyStore(this, metadata, loadSSTables, addIndexes));
             // CFS mbean instantiation will error out before we hit this, but in case that changes...
             if (oldCfs != null)
                 throw new IllegalStateException("added multiple mappings for cf id " + metadata.id);
@@ -723,6 +724,20 @@ public class Keyspace
         private final String name;
         private final SchemaProvider provider;
 
+        private volatile KeyspaceMetadataCache cachedKeyspaceMetadata;
+
+        private static class KeyspaceMetadataCache
+        {
+            private final UUID lastSeenSchemaVersion;
+            private final KeyspaceMetadata keyspaceMetadata;
+
+            private KeyspaceMetadataCache(UUID lastSeenSchemaVersion, KeyspaceMetadata keyspaceMetadata)
+            {
+                this.lastSeenSchemaVersion = lastSeenSchemaVersion;
+                this.keyspaceMetadata = keyspaceMetadata;
+            }
+        }
+
         public KeyspaceMetadataRef(KeyspaceMetadata initial, SchemaProvider provider)
         {
             this.initial = initial;
@@ -734,7 +749,30 @@ public class Keyspace
         {
             if (initial != null)
                 return initial;
-            return provider.getKeyspaceMetadata(name);
+            return getWithCaching();
+        }
+
+        private KeyspaceMetadata getWithCaching()
+        {
+            UUID schemaVersion = provider.getVersion();
+            if (schemaVersion == null)
+                return provider.getKeyspaceMetadata(name);
+
+            KeyspaceMetadataCache cache = cachedKeyspaceMetadata;
+            // we assume that local keyspaces and virtual keyspaces are immutable, so we need to track only a distributed schema version
+            KeyspaceMetadata metadata;
+            if (cache != null && schemaVersion.equals(cache.lastSeenSchemaVersion) && cache.keyspaceMetadata != null)
+                metadata = cache.keyspaceMetadata;
+            else
+            {
+                // we always retrieve metadata after schema version and assume they are changed coherently
+                // we may put new metadata + old schema version to the cache but not vice versa
+                // it we put non-latest schema version + latest metadata then it will be just updated on the next get() invocation
+                metadata = provider.getKeyspaceMetadata(name);
+                if (metadata != null)
+                    cachedKeyspaceMetadata = new KeyspaceMetadataCache(schemaVersion, metadata);
+            }
+            return metadata;
         }
 
         public void unsetInitial()

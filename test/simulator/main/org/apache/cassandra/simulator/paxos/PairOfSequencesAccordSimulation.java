@@ -203,7 +203,7 @@ public class PairOfSequencesAccordSimulation extends AbstractPairOfSequencesPaxo
                 IntHashSet seen = new IntHashSet();
                 //TODO if there isn't a value then we get empty read, which then doesn't make it into the QueryResult
                 // given the fact that we always run with the partitions defined this should be fine
-                try (HistoryValidator.Checker checker = validator.witness(outcome.start, outcome.end))
+                try (HistoryValidator.Checker checker = validator.witness(outcome, outcome.start, outcome.end))
                 {
                     while (result.hasNext())
                     {
@@ -307,7 +307,7 @@ public class PairOfSequencesAccordSimulation extends AbstractPairOfSequencesPaxo
         }
 
         sb.append("COMMIT TRANSACTION");
-        return new Query(sb.toString(), 0, ConsistencyLevel.ANY, ConsistencyLevel.ANY, binds.toArray(new Object[0]));
+        return new Query(sb.toString(), 0, ConsistencyLevel.QUORUM, ConsistencyLevel.QUORUM, binds.toArray(new Object[0]));
     }
 
     @Override

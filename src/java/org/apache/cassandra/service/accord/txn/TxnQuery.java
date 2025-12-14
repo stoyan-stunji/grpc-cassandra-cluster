@@ -119,7 +119,7 @@ public abstract class TxnQuery implements Query
 
             AccordUpdate accordUpdate = (AccordUpdate)update;
             TxnData txnData = (TxnData)data;
-            boolean conditionCheck = accordUpdate.checkCondition(data);
+            boolean conditionCheck = accordUpdate.checkAnyConditionMatch(data);
             // If the condition applied an empty result indicates success
             if (conditionCheck)
                 return new TxnData();
@@ -217,6 +217,9 @@ public abstract class TxnQuery implements Query
                 ClientRequestsMetricsHolder.accordWriteMetrics.accordMigrationRejects.mark();
             else
                 ClientRequestsMetricsHolder.accordReadMetrics.accordMigrationRejects.mark();
+            // Prevent writes from being applied
+            if (update != null)
+                ((TxnUpdate)update).failCondition();
             return RetryWithNewProtocolResult.instance;
         }
         return doCompute(txnId, executeAt, keys, data, read, update);

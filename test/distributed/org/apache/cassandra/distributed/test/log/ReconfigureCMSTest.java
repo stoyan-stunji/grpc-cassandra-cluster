@@ -61,6 +61,9 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.psjava.util.AssertStatus.assertTrue;
 
+/**
+ * @see org.apache.cassandra.tools.nodetool.CMSAdmin.ReconfigureCMS
+ */
 public class ReconfigureCMSTest extends FuzzTestBase
 {
     @Test
@@ -302,6 +305,19 @@ public class ReconfigureCMSTest extends FuzzTestBase
             Ballot node3Ballot = node3History.ballotForToken(MetaStrategy.partitioner.getMinimumToken());
             Ballot node1Ballot = node1History.ballotForToken(MetaStrategy.partitioner.getMinimumToken());
             assertTrue(node3Ballot.unixMicros() > node1Ballot.unixMicros());
+        }
+    }
+
+    @Test
+    public void testReconfigurePaxosRepairDisabled() throws IOException
+    {
+        try (Cluster cluster = builder().withNodes(3)
+                                        .withConfig(c -> c.with(Feature.NETWORK)
+                                                          .set("paxos_repair_enabled", "false"))
+                                        .withoutVNodes()
+                                        .start())
+        {
+            cluster.get(1).nodetoolResult("cms", "reconfigure", "3").asserts().success();
         }
     }
 

@@ -66,6 +66,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import accord.impl.progresslog.DefaultProgressLog;
 import com.googlecode.concurrenttrees.common.Iterables;
 import org.apache.cassandra.audit.AuditLogOptions;
 import org.apache.cassandra.auth.AllowAllInternodeAuthenticator;
@@ -188,6 +189,7 @@ public class DatabaseDescriptor
     private static final int MAX_NUM_TOKENS = 1536;
 
     private static Config conf;
+    private static DefaultProgressLog.Config accordProgressLogConfig;
 
     /**
      * Request timeouts can not be less than below defined value (see CASSANDRA-9375)
@@ -475,6 +477,11 @@ public class DatabaseDescriptor
         return conf;
     }
 
+    public static boolean hasLoggedConfig()
+    {
+        return hasLoggedConfig;
+    }
+
     @VisibleForTesting
     public static Config loadConfig() throws ConfigurationException
     {
@@ -558,7 +565,11 @@ public class DatabaseDescriptor
 
         applySslContext();
 
+        createAllDirectories();
+
         applyGuardrails();
+
+        applyAccordProgressLog();
 
         applyStartupChecks();
     }
@@ -1213,6 +1224,22 @@ public class DatabaseDescriptor
         // run audit logging options through sanitation and validation
         if (conf.audit_logging_options != null)
             setAuditLoggingOptions(conf.audit_logging_options);
+
+        try
+        {
+            // Run through the validation by setting current values back to their setters, so we are sure that their values are valid.
+            // We are catching IllegalArgumentException and translating it to ConfigurationException to comply with
+            // rest of the logic in this method. These setters are also called in GCInspectorMXBean were IllegalArgumentException
+            // is thrown when arguments are invalid instead ConfigurationException, on purpose.
+            DatabaseDescriptor.setGCLogThreshold((int) DatabaseDescriptor.getGCLogThreshold());
+            DatabaseDescriptor.setGCWarnThreshold((int) DatabaseDescriptor.getGCWarnThreshold());
+            DatabaseDescriptor.setGCConcurrentPhaseLogThreshold(DatabaseDescriptor.getGCConcurrentPhaseLogThreshold());
+            DatabaseDescriptor.setGCConcurrentPhaseWarnThreshold(DatabaseDescriptor.getGCConcurrentPhaseWarnThreshold());
+        }
+        catch (IllegalArgumentException ex)
+        {
+            throw new ConfigurationException(ex.getMessage());
+        }
     }
 
     @VisibleForTesting
@@ -1296,6 +1323,20 @@ public class DatabaseDescriptor
         catch (IllegalArgumentException e)
         {
             throw new ConfigurationException("Invalid guardrails configuration: " + e.getMessage(), e);
+        }
+    }
+
+    private static void applyAccordProgressLog()
+    {
+        try
+        {
+            accordProgressLogConfig = new DefaultProgressLog.Config();
+            accordProgressLogConfig.concurrency = conf.accord.progress_log_concurrency.or(32);
+            accordProgressLogConfig.maxActiveRunTime = conf.accord.progress_log_query_fallback_timeout.toDuration();
+        }
+        catch (IllegalArgumentException e)
+        {
+            throw new ConfigurationException("Invalid accord progress log configuration: " + e.getMessage(), e);
         }
     }
 
@@ -1655,9 +1696,7 @@ public class DatabaseDescriptor
         // responsible for querying the cloud metadata service to get the public IP used for
         // broadcast_address and we only want to instantiate the snitch here.
         addressConfig.configureAddresses();
-        initializationLocator = new Locator(RegistrationStatus.instance,
-                                            FBUtilities.getBroadcastAddressAndPort(),
-                                            initialLocationProvider);
+        applyLocator();
         nodeProximity = conf.dynamic_snitch ? new DynamicEndpointSnitch(proximity) : proximity;
         localAddressReconnector = addressConfig.preferLocalConnections()
                                   ? new ReconnectableSnitchHelper(initializationLocator, true)
@@ -1670,6 +1709,14 @@ public class DatabaseDescriptor
     public static void applyFailureDetector()
     {
         newFailureDetector = () -> createFailureDetector(conf.failure_detector);
+    }
+
+    @VisibleForTesting
+    public static void applyLocator()
+    {
+        initializationLocator = new Locator(RegistrationStatus.instance,
+                                            FBUtilities.getBroadcastAddressAndPort(),
+                                            initialLocationProvider);
     }
 
     // definitely not safe for tools + clients - implicitly instantiates schema
@@ -2200,6 +2247,16 @@ public class DatabaseDescriptor
         conf.credentials_cache_active_update = update;
     }
 
+    public static int getMaxCommentLength()
+    {
+        return conf.max_comment_length;
+    }
+
+    public static int getMaxSecurityLabelLength()
+    {
+        return conf.max_security_label_length;
+    }
+
     public static int getMaxValueSize()
     {
         return Ints.saturatedCast(conf.max_value_size.toMebibytes() * 1024L * 1024);
@@ -2263,7 +2320,7 @@ public class DatabaseDescriptor
         }
         catch (FSWriteError e)
         {
-            throw new IllegalStateException(e.getCause().getMessage() + "; unable to start server");
+            throw new IllegalStateException(e.getCause().getMessage() + "; unable to start server", e);
         }
     }
 
@@ -3185,6 +3242,16 @@ public class DatabaseDescriptor
     public static int getMaxMutationSize()
     {
         return conf.max_mutation_size.toBytes();
+    }
+
+    public static int getSSTablesPerReadLogThreshold()
+    {
+        return conf.sstables_per_read_log_threshold;
+    }
+
+    public static void setSSTablesPerReadLogThreshold(int threshold)
+    {
+        conf.sstables_per_read_log_threshold = threshold;
     }
 
     public static int getTombstoneWarnThreshold()
@@ -4382,6 +4449,47 @@ public class DatabaseDescriptor
         conf.counter_cache_keys_to_save = counterCacheKeysToSave;
     }
 
+    public static int getCompressionDictionaryRefreshIntervalSeconds()
+    {
+        return conf.compression_dictionary_refresh_interval.toSeconds();
+    }
+
+    public static int getCompressionDictionaryRefreshInitialDelaySeconds()
+    {
+        return conf.compression_dictionary_refresh_initial_delay.toSeconds();
+    }
+
+    public static int getCompressionDictionaryCacheSize()
+    {
+        return conf.compression_dictionary_cache_size;
+    }
+
+    public static int getCompressionDictionaryCacheExpireSeconds()
+    {
+        return conf.compression_dictionary_cache_expire.toSeconds();
+    }
+
+    public static int getCompressionDictionaryTrainingMaxDictionarySize()
+    {
+        return conf.compression_dictionary_training_max_dictionary_size.toBytes();
+    }
+
+    public static int getCompressionDictionaryTrainingMaxTotalSampleSize()
+    {
+        return conf.compression_dictionary_training_max_total_sample_size.toBytes();
+    }
+
+    public static boolean getCompressionDictionaryTrainingAutoTrainEnabled()
+    {
+        return conf.compression_dictionary_training_auto_train_enabled;
+    }
+
+
+    public static float getCompressionDictionaryTrainingSamplingRate()
+    {
+        return conf.compression_dictionary_training_sampling_rate;
+    }
+
     public static int getStreamingKeepAlivePeriod()
     {
         return conf.streaming_keep_alive_period.toSeconds();
@@ -4699,14 +4807,17 @@ public class DatabaseDescriptor
         return conf.gc_log_threshold.toMilliseconds();
     }
 
-    public static void setGCLogThreshold(int gcLogThreshold)
+    public static void setGCLogThreshold(int threshold)
     {
-        conf.gc_log_threshold = new DurationSpec.IntMillisecondsBound(gcLogThreshold);
-    }
+        if (threshold <= 0)
+            throw new IllegalArgumentException("Threshold value for gc_log_threshold must be greater than 0");
 
-    public static EncryptionContext getEncryptionContext()
-    {
-        return encryptionContext;
+        long gcWarnThresholdInMs = getGCWarnThreshold();
+        if (gcWarnThresholdInMs != 0 && threshold > gcWarnThresholdInMs)
+            throw new IllegalArgumentException("Threshold value for gc_log_threshold (" + threshold + ") must be less than gc_warn_threshold which is currently "
+                                               + gcWarnThresholdInMs);
+
+        conf.gc_log_threshold = new DurationSpec.IntMillisecondsBound(threshold);
     }
 
     public static long getGCWarnThreshold()
@@ -4716,7 +4827,56 @@ public class DatabaseDescriptor
 
     public static void setGCWarnThreshold(int threshold)
     {
+        if (threshold < 0)
+            throw new IllegalArgumentException("Threshold value for gc_warn_threshold must be greater than or equal to 0");
+
+        long gcLogThresholdInMs = getGCLogThreshold();
+        if (threshold != 0 && threshold <= gcLogThresholdInMs)
+            throw new IllegalArgumentException("Threshold value for gc_warn_threshold (" + threshold + ") must be greater than gc_log_threshold which is currently "
+                                               + gcLogThresholdInMs);
+
         conf.gc_warn_threshold = new DurationSpec.IntMillisecondsBound(threshold);
+    }
+
+    public static int getGCConcurrentPhaseLogThreshold()
+    {
+        return conf.gc_concurrent_phase_log_threshold.toMilliseconds();
+    }
+
+    public static void setGCConcurrentPhaseLogThreshold(int threshold)
+    {
+        if (threshold <= 0)
+            throw new IllegalArgumentException("Threshold must be greater than 0");
+
+        long gcConcurrentPhaseWarnThresholdInMs = getGCConcurrentPhaseWarnThreshold();
+        if (gcConcurrentPhaseWarnThresholdInMs != 0 && threshold > gcConcurrentPhaseWarnThresholdInMs)
+            throw new IllegalArgumentException("Threshold value for gc_concurrent_phase_log_threshold (" + threshold + ") must be less than gc_concurrent_phase_warn_threshold which is currently "
+                                               + gcConcurrentPhaseWarnThresholdInMs);
+
+        conf.gc_concurrent_phase_log_threshold = new DurationSpec.IntMillisecondsBound(threshold);
+    }
+
+    public static int getGCConcurrentPhaseWarnThreshold()
+    {
+        return conf.gc_concurrent_phase_warn_threshold.toMilliseconds();
+    }
+
+    public static void setGCConcurrentPhaseWarnThreshold(int threshold)
+    {
+        if (threshold < 0)
+            throw new IllegalArgumentException("Threshold value for gc_concurrent_phase_warn_threshold must be greater than or equal to 0");
+
+        long gcConcurrentPhaseLogThresholdInMs = getGCConcurrentPhaseLogThreshold();
+        if (threshold != 0 && threshold <= gcConcurrentPhaseLogThresholdInMs)
+            throw new IllegalArgumentException("Threshold value for gc_concurrent_phase_warn_threshold (" + threshold + ") must be greater than gc_concurrent_phase_log_threshold which is currently "
+                                               + gcConcurrentPhaseLogThresholdInMs);
+
+        conf.gc_concurrent_phase_warn_threshold = new DurationSpec.IntMillisecondsBound(threshold);
+    }
+
+    public static EncryptionContext getEncryptionContext()
+    {
+        return encryptionContext;
     }
 
     public static boolean isCDCEnabled()
@@ -5418,7 +5578,6 @@ public class DatabaseDescriptor
             case THREAD_PER_SHARD_SYNC_QUEUE:
                 return conf.accord.queue_shard_count.or(DatabaseDescriptor::getAvailableProcessors);
             case THREAD_POOL_PER_SHARD:
-            case THREAD_POOL_PER_SHARD_EXCLUDES_IO:
                 int defaultMax = getAccordQueueSubmissionModel() == AccordSpec.QueueSubmissionModel.SYNC ? 8 : 4;
                 return conf.accord.queue_shard_count.or(Math.min(defaultMax, DatabaseDescriptor.getAvailableProcessors()));
         }
@@ -5437,6 +5596,11 @@ public class DatabaseDescriptor
     public static int getAccordMaxQueuedRangeLoadCount()
     {
         return conf.accord.max_queued_range_loads.or(Math.max(4, getAccordConcurrentOps() / 4));
+    }
+
+    public static DefaultProgressLog.Config getAccordProgressLogConfig()
+    {
+        return accordProgressLogConfig;
     }
 
     public static boolean getAccordCacheShrinkingOn()
@@ -5472,14 +5636,14 @@ public class DatabaseDescriptor
         return bound == null ? -1 : bound.to(TimeUnit.MILLISECONDS);
     }
 
-    public static long getAccordGCDelay(TimeUnit unit)
-    {
-        return conf.accord.gc_delay.to(unit);
-    }
-
     public static int getAccordShardDurabilityTargetSplits()
     {
         return conf.accord.shard_durability_target_splits;
+    }
+
+    public static int getAccordShardDurabilityMaxSplits()
+    {
+        return conf.accord.shard_durability_max_splits;
     }
 
     public static long getAccordScheduleDurabilityTxnIdLag(TimeUnit unit)
@@ -5923,6 +6087,11 @@ public class DatabaseDescriptor
         return conf.sai_sstable_indexes_per_query_fail_threshold;
     }
 
+    public static int getSecondaryIndexesPerTableFailThreshold()
+    {
+        return conf.secondary_indexes_per_table_fail_threshold;
+    }
+
     @VisibleForTesting
     public static void setTriggersPolicy(Config.TriggersPolicy policy)
     {
@@ -5935,9 +6104,14 @@ public class DatabaseDescriptor
         return conf.triggers_policy;
     }
 
-    public static boolean isPasswordValidatorReconfigurationEnabled()
+    public static boolean isPasswordPolicyReconfigurationEnabled()
     {
-        return conf.password_validator_reconfiguration_enabled;
+        return conf.password_policy_reconfiguration_enabled;
+    }
+
+    public static boolean isRoleNamePolicyReconfigurationEnabled()
+    {
+        return conf.role_name_policy_reconfiguration_enabled;
     }
 
     public static Config.TombstonesMetricGranularity getPurgeableTobmstonesMetricGranularity()
@@ -5972,18 +6146,18 @@ public class DatabaseDescriptor
         return conf.auto_repair;
     }
 
-    public static double getIncrementalRepairDiskHeadroomRejectRatio()
+    public static double getRepairDiskHeadroomRejectRatio()
     {
-        return conf.incremental_repair_disk_headroom_reject_ratio;
+        return conf.repair_disk_headroom_reject_ratio;
     }
 
-    public static void setIncrementalRepairDiskHeadroomRejectRatio(double value)
+    public static void setRepairDiskHeadroomRejectRatio(double value)
     {
         if (value < 0.0 || value > 1.0)
         {
-            throw new IllegalArgumentException("Value must be >= 0 and <= 1 for incremental_repair_disk_headroom_reject_ratio");
+            throw new IllegalArgumentException("Value must be >= 0 and <= 1 for repair_disk_headroom_reject_ratio");
         }
-        conf.incremental_repair_disk_headroom_reject_ratio = value;
+        conf.repair_disk_headroom_reject_ratio = value;
     }
 
     @VisibleForTesting

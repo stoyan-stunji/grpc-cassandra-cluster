@@ -89,27 +89,34 @@ public class RowFilter implements Iterable<RowFilter.Expression>
     private static final Logger logger = LoggerFactory.getLogger(RowFilter.class);
 
     public static final Serializer serializer = new Serializer();
-    public static final RowFilter NONE = new RowFilter(Collections.emptyList(), false);
+    public static final RowFilter NONE = new RowFilter(Collections.emptyList(), false, IndexHints.NONE);
 
     protected final List<Expression> expressions;
-
     private final boolean needsReconciliation;
+    public final IndexHints indexHints;
 
-    protected RowFilter(List<Expression> expressions, boolean needsReconciliation)
+    protected RowFilter(List<Expression> expressions, boolean needsReconciliation, IndexHints indexHints)
     {
         this.expressions = expressions;
         this.needsReconciliation = needsReconciliation;
+        this.indexHints = indexHints;
     }
 
     /**
      * 
      * @param needsReconciliation whether or not this filter belongs to a read that requires coordinator reconciliation 
+     * @param indexHints instructions on what indexes to use (and not use) during queries
      * 
      * @return a new {@link RowFilter} with an empty {@link Expression} list
      */
+    public static RowFilter create(boolean needsReconciliation, IndexHints indexHints)
+    {
+        return new RowFilter(new ArrayList<>(), needsReconciliation, indexHints);
+    }
+
     public static RowFilter create(boolean needsReconciliation)
     {
-        return new RowFilter(new ArrayList<>(), needsReconciliation);
+        return create(needsReconciliation, IndexHints.NONE);
     }
 
     public static RowFilter none()
@@ -134,7 +141,7 @@ public class RowFilter implements Iterable<RowFilter.Expression>
         add(new CustomExpression(metadata, targetIndex, value));
     }
 
-    private void add(Expression expression)
+    public void add(Expression expression)
     {
         expression.validate();
         expressions.add(expression);
@@ -407,7 +414,7 @@ public class RowFilter implements Iterable<RowFilter.Expression>
     public RowFilter withoutReconciliation()
     {
         if (needsReconciliation)
-            return new RowFilter(expressions, false);
+            return new RowFilter(expressions, false, indexHints);
         return this;
     }
 
@@ -436,7 +443,7 @@ public class RowFilter implements Iterable<RowFilter.Expression>
 
     protected RowFilter withNewExpressions(List<Expression> expressions)
     {
-        return new RowFilter(expressions, needsReconciliation);
+        return new RowFilter(expressions, needsReconciliation, indexHints);
     }
 
     public boolean isEmpty()
@@ -540,6 +547,28 @@ public class RowFilter implements Iterable<RowFilter.Expression>
         {
             checkFalse(value.remaining() > FBUtilities.MAX_UNSIGNED_SHORT,
                        "Index expression values may not be larger than 64K");
+        }
+
+        /**
+         * Rebind this expression to a table metadata that is expected to have equivalent columns.
+         * If any referenced column is missing, returns null;
+         * if any referenced column has a different type throws an exception
+         */
+        public Expression rebind(TableMetadata newTable)
+        {
+            throw new UnsupportedOperationException("Expression " + toString(true) + " does not support rebinding to another table definition");
+        }
+
+        protected static ColumnMetadata rebind(ColumnMetadata in, TableMetadata newTable)
+        {
+            ColumnMetadata out = newTable.getColumn(in.name);
+            if (out == null)
+                return null;
+
+            if (!out.type.equals(in.type) && !out.type.isCompatibleWith(in.type) || !in.type.isCompatibleWith(out.type))
+                throw new IllegalArgumentException("The provided TableMetadata is not compatible with the expression");
+
+            return out;
         }
 
         /**
@@ -728,6 +757,16 @@ public class RowFilter implements Iterable<RowFilter.Expression>
         }
 
         @Override
+        public Expression rebind(TableMetadata newTable)
+        {
+            ColumnMetadata out = rebind(column, newTable);
+            if (out == null)
+                return null;
+
+            return new SimpleExpression(out, operator, value);
+        }
+
+        @Override
         public boolean isSatisfiedBy(TableMetadata metadata, DecoratedKey partitionKey, Row row, long nowInSec)
         {
             // We support null conditions for LWT (in ColumnCondition) but not for RowFilter.
@@ -844,6 +883,16 @@ public class RowFilter implements Iterable<RowFilter.Expression>
             checkBindValueSet(key, "Unsupported unset map key for column %s", column.name);
             checkNotNull(value, "Unsupported null map value for column %s", column.name);
             checkBindValueSet(value, "Unsupported unset map value for column %s", column.name);
+        }
+
+        @Override
+        public Expression rebind(TableMetadata newTable)
+        {
+            ColumnMetadata out = rebind(column, newTable);
+            if (out == null)
+                return null;
+
+            return new MapElementExpression(out, key, operator, value);
         }
 
         @Override
@@ -971,6 +1020,12 @@ public class RowFilter implements Iterable<RowFilter.Expression>
             return Kind.CUSTOM;
         }
 
+        @Override
+        public Expression rebind(TableMetadata newTable)
+        {
+            return new CustomExpression(table, targetIndex, value);
+        }
+
         // Filtering by custom expressions isn't supported yet, so just accept any row
         @Override
         public boolean isSatisfiedBy(TableMetadata metadata, DecoratedKey partitionKey, Row row, long nowInSec)
@@ -1078,6 +1133,7 @@ public class RowFilter implements Iterable<RowFilter.Expression>
         public void serialize(RowFilter filter, DataOutputPlus out, int version) throws IOException
         {
             out.writeBoolean(false); // Old "is for thrift" boolean
+            IndexHints.serializer.serialize(filter.indexHints, out, version);
             out.writeUnsignedVInt32(filter.expressions.size());
             for (Expression expr : filter.expressions)
                 Expression.serializer.serialize(expr, out, version);
@@ -1087,12 +1143,13 @@ public class RowFilter implements Iterable<RowFilter.Expression>
         public RowFilter deserialize(DataInputPlus in, int version, TableMetadata metadata, boolean needsReconciliation) throws IOException
         {
             in.readBoolean(); // Unused
+            IndexHints indexHints = IndexHints.serializer.deserialize(in, version, metadata);
             int size = in.readUnsignedVInt32();
             List<Expression> expressions = new ArrayList<>(size);
             for (int i = 0; i < size; i++)
                 expressions.add(Expression.serializer.deserialize(in, version, metadata));
 
-            return new RowFilter(expressions, needsReconciliation);
+            return new RowFilter(expressions, needsReconciliation, indexHints);
         }
 
         public long serializedSize(RowFilter filter, int version)
@@ -1101,6 +1158,8 @@ public class RowFilter implements Iterable<RowFilter.Expression>
                       + TypeSizes.sizeofUnsignedVInt(filter.expressions.size());
             for (Expression expr : filter.expressions)
                 size += Expression.serializer.serializedSize(expr, version);
+            
+            size += IndexHints.serializer.serializedSize(filter.indexHints, version);
             return size;
         }
     }

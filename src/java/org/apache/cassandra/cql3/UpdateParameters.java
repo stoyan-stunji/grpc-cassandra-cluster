@@ -35,6 +35,7 @@ import org.apache.cassandra.db.rows.BTreeRow;
 import org.apache.cassandra.db.rows.BufferCell;
 import org.apache.cassandra.db.rows.Cell;
 import org.apache.cassandra.db.rows.CellPath;
+import org.apache.cassandra.db.rows.ComplexColumnData;
 import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.db.rows.Rows;
 import org.apache.cassandra.exceptions.InvalidRequestException;
@@ -60,9 +61,6 @@ public class UpdateParameters
 
     // Holds data for operations that require a read-before-write. Will be null otherwise.
     private final Map<DecoratedKey, Partition> prefetchedRows;
-
-    private Row.Builder staticBuilder;
-    private Row.Builder regularBuilder;
 
     // The builder currently in use. Will alias either staticBuilder or regularBuilder, which are themselves built lazily.
     private Row.Builder builder;
@@ -107,20 +105,8 @@ public class UpdateParameters
                     throw new InvalidRequestException("Invalid empty or null value for column " + metadata.clusteringColumns().get(0).name);
             }
         }
-
-        if (clustering == Clustering.STATIC_CLUSTERING)
-        {
-            if (staticBuilder == null)
-                staticBuilder = BTreeRow.pooledUnsortedBuilder();
-            builder = staticBuilder;
-        }
-        else
-        {
-            if (regularBuilder == null)
-                regularBuilder = BTreeRow.pooledUnsortedBuilder();
-            builder = regularBuilder;
-        }
-
+        assert builder == null : "newRow called without building the previous row";
+        builder = BTreeRow.pooledUnsortedBuilder();
         builder.newRow(clustering);
     }
 
@@ -202,7 +188,22 @@ public class UpdateParameters
         newRow(row.clustering());
         addRowDeletion(row.deletion());
         addPrimaryKeyLivenessInfo(row.primaryKeyLivenessInfo());
-        row.cells().forEach(builder::addCell);
+        row.iterator().forEachRemaining(cd -> {
+            if (cd instanceof Cell<?>)
+            {
+                builder.addCell((Cell<?>) cd);
+            }
+            else if (cd instanceof ComplexColumnData)
+            {
+                ComplexColumnData ccd = (ComplexColumnData) cd;
+                builder.addComplexDeletion(ccd.column(), ccd.complexDeletion());
+                ccd.iterator().forEachRemaining(builder::addCell);
+            }
+            else
+            {
+                throw new AssertionError("Unexpected type: " + cd.getClass() + "; " + cd);
+            }
+        });
     }
 
     private void validateColumnSize(ColumnMetadata column, ByteBuffer value)

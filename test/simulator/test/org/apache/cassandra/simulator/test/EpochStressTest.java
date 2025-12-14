@@ -33,11 +33,11 @@ import org.junit.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import accord.api.ConfigurationService;
 import accord.local.Node;
 import accord.primitives.Ranges;
+import accord.topology.EpochReady;
 import accord.topology.TopologyManager;
-import org.apache.cassandra.service.accord.AccordConfigurationService;
+import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.service.accord.AccordService;
 import org.apache.cassandra.service.consensus.TransactionalMode;
 import org.apache.cassandra.simulator.Action;
@@ -49,13 +49,14 @@ import org.apache.cassandra.simulator.cluster.ClusterActions;
 import org.apache.cassandra.tcm.ClusterMetadata;
 import org.apache.cassandra.tcm.ClusterMetadataService;
 import org.apache.cassandra.tcm.membership.NodeId;
+import org.apache.cassandra.utils.AssertionUtils;
 import org.apache.cassandra.utils.Clock;
 
 import static org.apache.cassandra.simulator.cluster.ClusterActions.InitialConfiguration.initializeAll;
 import static org.apache.cassandra.simulator.cluster.ClusterActions.Options.noActions;
 
 /**
- * In order to run these tests in your IDE, you need to first build a simulator jara
+ * In order to run these tests in your IDE, you need to first build a simulator jar
  *
  *    ant simulator-jars
  *
@@ -121,10 +122,20 @@ import static org.apache.cassandra.simulator.cluster.ClusterActions.Options.noAc
  --add-opens jdk.management/com.sun.management.internal=ALL-UNNAMED
  --add-opens jdk.management.jfr/jdk.management.jfr=ALL-UNNAMED
  --add-opens java.desktop/com.sun.beans.introspect=ALL-UNNAMED
-
  */
 public class EpochStressTest extends SimulationTestBase
 {
+    private static boolean allowedExceptions(Throwable t)
+    {
+        if (AssertionUtils.isInstanceof(InvalidRequestException.class).matches(t))
+        {
+            String msg = t.getMessage();
+            return !msg.contains("policy Retry{remainingMs=0")                                      // this used the "request_timeout" config
+                   && !(msg.contains("policy Retry{") && msg.endsWith(", attempts=12} gave up") );  // this used the cms_retry_delay config
+        }
+        return true;
+    }
+
     @Test
     public void manyEpochsAndAccordConverges() throws IOException
     {
@@ -145,7 +156,7 @@ public class EpochStressTest extends SimulationTestBase
                      for (int i = 0; i < numEpochs; i++)
                      {
                          int node = random.uniform(1, simulation.cluster.size() + 1);
-                         actions.add(simulation.schemaChange(node, "ALTER TABLE ks.tbl WITH comment = 'step=" + i + "'"));
+                         actions.add(simulation.schemaChange(node, "ALTER TABLE ks.tbl WITH comment = 'step=" + i + '\'', EpochStressTest::allowedExceptions));
                      }
                      return ActionList.of(actions);
                  },
@@ -158,7 +169,19 @@ public class EpochStressTest extends SimulationTestBase
                  },
                  config -> config.nodes(3, 3)
                                  .dcs(1, 1)
-                                 .threadCount(100));
+                                 .threadCount(100),
+                 (rs, config) -> {
+                     // Cluster defaults cause ~100% test failure before reaching 100 epochs, so we cover this case
+                     // for potential visibility violations. With CMS retry configs at 1h, failure rate drops to 10%
+                     // and more seeds complete all 100 epochs.
+                     if (rs.decide(0.3f)) return; // 30% of the time use the cluster defaults, so have a high failure rate for TCM transactions
+                     // Make the retry rate long enough that it should recover most of the time.
+                     // As of this moment this only impacts CMS nodes, so if the CQL is sent to a non-CMS node then request_timeout is used for retry timeout, which makes this fail ~10% of the time
+                     config.set("cms_await_timeout", "3600s")
+                           .set("cms_retry_delay", "3600s")
+                           .set("cms_default_max_retries", Integer.toString(Integer.MAX_VALUE));
+                 }
+        );
     }
 
     private static void validate()
@@ -171,7 +194,6 @@ public class EpochStressTest extends SimulationTestBase
 
         AccordService accord = (AccordService) AccordService.instance();
         Node node = accord.node();
-        AccordConfigurationService configService = (AccordConfigurationService) node.configService();
         TopologyManager tm = node.topology();
         long minEpoch = tm.minEpoch();
 
@@ -188,26 +210,9 @@ public class EpochStressTest extends SimulationTestBase
         for (long epoch = minEpoch; epoch <= maxEpoch; epoch++)
         {
             long finalEpoch = epoch;
-            ConfigurationService.EpochReady ready = tm.epochReady(epoch);
+            EpochReady ready = tm.active().epochReady(epoch);
             while (!isDone(ready))
                 sleep.accept(() -> "Epoch " + finalEpoch + "'s EpochReady is not done; " + ready);
-
-            AccordConfigurationService.EpochSnapshot snapshot = configService.getEpochSnapshot(epoch);
-            while (!isDone(snapshot))
-            {
-                AccordConfigurationService.SyncStatus status = snapshot.syncStatus;
-                sleep.accept(() -> "Epoch " + finalEpoch + "'s SyncStatus is not done; " + status);
-                snapshot = configService.getEpochSnapshot(epoch);
-            }
-
-            Ranges expected = tm.globalForEpoch(epoch).ranges().mergeTouching();
-            Ranges synced = tm.syncComplete(epoch).mergeTouching();
-            while (!isDone(synced, expected))
-            {
-                Ranges finalSynced = synced;
-                sleep.accept(() -> "Epoch " + finalEpoch + "'s syncComplete is not done; missing " + expected.without(finalSynced));
-                synced = tm.syncComplete(epoch).mergeTouching();
-            }
         }
         logger.info("All epochs completed in {}", Duration.ofNanos(Clock.Global.nanoTime() - startNano));
     }
@@ -217,14 +222,9 @@ public class EpochStressTest extends SimulationTestBase
         return synced.equals(expected);
     }
 
-    private static boolean isDone(AccordConfigurationService.EpochSnapshot snapshot)
+    private static boolean isDone(EpochReady ready)
     {
-        return snapshot.syncStatus == AccordConfigurationService.SyncStatus.COMPLETED;
-    }
-
-    private static boolean isDone(ConfigurationService.EpochReady ready)
-    {
-        return ready.metadata.isDone()
+        return ready.active.isDone()
                && ready.coordinate.isDone()
                && ready.data.isDone()
                && ready.reads.isDone();

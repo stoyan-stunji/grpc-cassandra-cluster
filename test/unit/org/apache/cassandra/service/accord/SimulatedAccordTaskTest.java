@@ -106,7 +106,7 @@ public class SimulatedAccordTaskTest extends SimulatedAccordCommandStoreTestBase
                 {
                     case Task:
                     {
-                        PreLoadContext ctx = PreLoadContext.contextFor(unseekablesGen.next(rs));
+                        PreLoadContext ctx = (PreLoadContext.Empty)()->"Test";
                         instance.maybeCacheEvict(ctx.keys());
                         operation(instance, ctx, actionGen.next(rs), rs::nextBoolean).chain().begin(counter);
                     }
@@ -120,16 +120,16 @@ public class SimulatedAccordTaskTest extends SimulatedAccordCommandStoreTestBase
                         FullRoute<?> route = txnWithRoute.right;
                         PreAccept preAccept = new PreAccept(nodeId, instance.topologies, txnId, txn, null, false, route) {
                             @Override
-                            public PreAcceptReply apply(SafeCommandStore safeStore)
+                            public PreAcceptReply applyInternal(SafeCommandStore safeStore)
                             {
-                                PreAcceptReply result = super.apply(safeStore);
+                                PreAcceptReply result = super.applyInternal(safeStore);
                                 if (action == Action.FAILURE)
                                     throw new SimulatedFault("PreAccept failed for keys " + keys());
                                 return result;
                             }
                         };
                         instance.maybeCacheEvict(txn.keys().toParticipants());
-                        instance.processAsync(preAccept).begin(counter);
+                        instance.processAsync(preAccept).invoke(counter);
                     }
                     break;
                     default:

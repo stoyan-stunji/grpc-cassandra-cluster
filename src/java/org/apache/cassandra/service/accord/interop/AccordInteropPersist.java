@@ -21,13 +21,16 @@ package org.apache.cassandra.service.accord.interop;
 import java.util.function.BiConsumer;
 
 import accord.api.Result;
+import accord.coordinate.ExecuteFlag;
 import accord.coordinate.Persist;
 import accord.coordinate.tracking.AllTracker;
 import accord.coordinate.tracking.QuorumTracker;
 import accord.coordinate.tracking.RequestStatus;
 import accord.coordinate.tracking.ResponseTracker;
 import accord.local.Node;
+import accord.local.SequentialAsyncExecutor;
 import accord.messages.Apply;
+import accord.primitives.Ballot;
 import accord.primitives.Deps;
 import accord.primitives.FullRoute;
 import accord.primitives.Route;
@@ -37,6 +40,7 @@ import accord.primitives.TxnId;
 import accord.primitives.Writes;
 import accord.topology.Topologies;
 import accord.utils.Invariants;
+import accord.utils.UnhandledEnum;
 import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.utils.Throwables;
 
@@ -108,9 +112,9 @@ public class AccordInteropPersist extends Persist
     private final ConsistencyLevel consistencyLevel;
     private CallbackHolder callback;
 
-    public AccordInteropPersist(Node node, Topologies topologies, TxnId txnId, Route<?> sendTo, Txn txn, Timestamp executeAt, Deps deps, Writes writes, Result result, FullRoute<?> fullRoute, ConsistencyLevel consistencyLevel, BiConsumer<? super Result, Throwable> clientCallback)
+    public AccordInteropPersist(Node node, SequentialAsyncExecutor executor, Topologies topologies, TxnId txnId, Route<?> sendTo, Ballot ballot, Txn txn, Timestamp executeAt, Deps deps, Writes writes, Result result, FullRoute<?> fullRoute, ConsistencyLevel consistencyLevel, ExecuteFlag.CoordinationFlags flags, boolean informDurableOnDone, Apply.Kind applyKind, BiConsumer<? super Result, Throwable> clientCallback)
     {
-        super(node, topologies, txnId, sendTo, txn, executeAt, deps, writes, result, fullRoute, AccordInteropApply.FACTORY);
+        super(node, executor, topologies, txnId, ballot, sendTo, txn, executeAt, deps, writes, result, fullRoute, flags, informDurableOnDone, AccordInteropApply.FACTORY, applyKind);
         Invariants.requireArgument(consistencyLevel == ConsistencyLevel.QUORUM || consistencyLevel == ConsistencyLevel.ALL || consistencyLevel == ConsistencyLevel.SERIAL || consistencyLevel == ConsistencyLevel.ONE);
         this.consistencyLevel = consistencyLevel;
         registerClientCallback(result, clientCallback);
@@ -124,10 +128,10 @@ public class AccordInteropPersist extends Persist
             case ONE: // Can safely upgrade ONE to QUORUM/SERIAL to get a synchronous commit
             case SERIAL:
             case QUORUM:
-                callback = new CallbackHolder(new QuorumTracker(topologies), result, clientCallback);
+                callback = new CallbackHolder(new QuorumTracker(tracker.topologies()), result, clientCallback);
                 break;
             case ALL:
-                callback = new CallbackHolder(new AllTracker(topologies), result, clientCallback);
+                callback = new CallbackHolder(new AllTracker(tracker.topologies()), result, clientCallback);
                 break;
             default:
                 throw new IllegalArgumentException("Unhandled consistency level: " + consistencyLevel);
@@ -138,8 +142,9 @@ public class AccordInteropPersist extends Persist
     public void onSuccess(Node.Id from, Apply.ApplyReply reply)
     {
         super.onSuccess(from, reply);
-        switch (reply)
+        switch (reply.kind)
         {
+            case InsufficientEpochs: throw UnhandledEnum.invalid(reply.kind);
             case Redundant:
             case Applied:
                 callback.recordSuccess(from);
@@ -148,19 +153,27 @@ public class AccordInteropPersist extends Persist
                 // On insufficient Persist will send a commit with the missing information
                 // which will allow a final response to be returned later that could be successful
                 return;
-            default: throw new IllegalArgumentException("Unhandled apply response " + reply);
+            default: throw UnhandledEnum.unknown(reply.kind);
         }
+    }
+
+    @Override
+    public void start()
+    {
+        super.start();
     }
 
     @Override
     public void onFailure(Node.Id from, Throwable failure)
     {
         callback.recordFailure(from, failure);
+        super.onFailure(from, failure);
     }
 
     @Override
     public boolean onCallbackFailure(Node.Id from, Throwable failure)
     {
+        super.onCallbackFailure(from, failure);
         return callback.recordCallbackFailure(failure);
     }
 }

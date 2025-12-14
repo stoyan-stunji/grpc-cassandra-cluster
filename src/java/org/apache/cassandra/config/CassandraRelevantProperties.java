@@ -18,6 +18,7 @@
 
 package org.apache.cassandra.config;
 
+import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
@@ -87,6 +88,9 @@ public enum CassandraRelevantProperties
     CACHEABLE_MUTATION_SIZE_LIMIT("cassandra.cacheable_mutation_size_limit_bytes", convertToString(1_000_000)),
     CASSANDRA_ALLOW_SIMPLE_STRATEGY("cassandra.allow_simplestrategy"),
     CASSANDRA_AVAILABLE_PROCESSORS("cassandra.available_processors"),
+    /** By default, the standard Cassandra CLI layout is used for backward compatibility, however,
+     * the new Picocli layout can be enabled by setting this property to the {@code "picocli"}. */
+    CASSANDRA_CLI_LAYOUT("cassandra.cli.layout", "airline"),
     /** The classpath storage configuration file. */
     CASSANDRA_CONFIG("cassandra.config", "cassandra.yaml"),
     /**
@@ -180,6 +184,7 @@ public enum CassandraRelevantProperties
      * Default is set to false.
      */
     COM_SUN_MANAGEMENT_JMXREMOTE_SSL_NEED_CLIENT_AUTH("com.sun.management.jmxremote.ssl.need.client.auth"),
+    CONFIG_ALLOW_ENVIRONMENT_VARIABLES("cassandra.config.allow_environment_variables"),
     /** Defaults to false for 4.1 but plan to switch to true in a later release the thinking is that environments
      * may not work right off the bat so safer to add this feature disabled by default */
     CONFIG_ALLOW_SYSTEM_PROPERTIES("cassandra.config.allow_system_properties"),
@@ -223,6 +228,7 @@ public enum CassandraRelevantProperties
     DTEST_ACCORD_ENABLED("jvm_dtest.accord.enabled", "true"),
     DTEST_ACCORD_JOURNAL_SANITY_CHECK_ENABLED("jvm_dtest.accord.journal_sanity_check_enabled", "false"),
     DTEST_API_LOG_TOPOLOGY("cassandra.dtest.api.log.topology"),
+    DTEST_IGNORE_SHUTDOWN_THREADCOUNT("jvm_dtests.ignore_shutdown_threadcount"),
     /** This property indicates if the code is running under the in-jvm dtest framework */
     DTEST_IS_IN_JVM_DTEST("org.apache.cassandra.dtest.is_in_jvm_dtest"),
     /** In_JVM dtest property indicating that the test should use "latest" configuration */
@@ -573,8 +579,6 @@ public enum CassandraRelevantProperties
     // transactional cluster metadata relevant properties
     // TODO: not a fan of being forced to prefix these to satisfy the alphabetic ordering constraint
     //       but it makes sense to group logically related properties together
-
-    TCM_ALLOW_TRANSFORMATIONS_DURING_UPGRADES("cassandra.allow_transformations_during_upgrades", "false"),
     /**
      * for testing purposes disable the automatic CMS reconfiguration after a bootstrap/replace/move operation
      */
@@ -585,7 +589,7 @@ public enum CassandraRelevantProperties
     TCM_SORT_REPLICA_GROUPS("cassandra.sorted_replica_groups_enabled", "true"),
     TCM_UNSAFE_BOOT_WITH_CLUSTERMETADATA("cassandra.unsafe_boot_with_clustermetadata", null),
     TCM_USE_ATOMIC_LONG_PROCESSOR("cassandra.test.use_atomic_long_processor", "false"),
-    TCM_USE_NO_OP_REPLICATOR("cassandra.test.use_no_op_replicator", "false"),
+    TCM_USE_TEST_NO_OP_REPLICATOR("cassandra.test.use_no_op_replicator", "false"),
     TEST_ACCORD_STORE_THREAD_CHECKS_ENABLED("cassandra.test.accord.store.thread_checks_enabled", "true"),
     TEST_BBFAILHELPER_ENABLED("test.bbfailhelper.enabled"),
     TEST_BLOB_SHARED_SEED("cassandra.test.blob.shared.seed", "42"),
@@ -676,6 +680,8 @@ public enum CassandraRelevantProperties
     USE_NIX_RECURSIVE_DELETE("cassandra.use_nix_recursive_delete"),
     /** Gossiper compute expiration timeout. Default value 3 days. */
     VERY_LONG_TIME_MS("cassandra.very_long_time_ms", "259200000"),
+    /** Controls output format for Collection-type settings in system_views.settings table */
+    VIRTUAL_TABLE_COMPLEX_SETTINGS_FORMAT_JSON("cassandra.virtual_table_complex_settings_format_json", "true"),
     WAIT_FOR_TRACING_EVENTS_TIMEOUT_SECS("cassandra.wait_for_tracing_events_timeout_secs", "0"),
     ;
 
@@ -1002,7 +1008,16 @@ public enum CassandraRelevantProperties
     public <T extends Enum<T>> T getEnum(boolean toUppercase, Class<T> enumClass)
     {
         String value = System.getProperty(key, defaultVal);
-        return Enum.valueOf(enumClass, toUppercase ? toUpperCaseLocalized(value) : value);
+        try
+        {
+            return Enum.valueOf(enumClass, toUppercase ? toUpperCaseLocalized(value) : value);
+        }
+        catch (IllegalArgumentException e)
+        {
+            throw new ConfigurationException(String.format("Invalid value for system propery '%s': " +
+                                                           "expected one of %s (case-insensitive) but was '%s'",
+                                                           key, Arrays.toString(enumClass.getEnumConstants()), value));
+        }
     }
 
     /**

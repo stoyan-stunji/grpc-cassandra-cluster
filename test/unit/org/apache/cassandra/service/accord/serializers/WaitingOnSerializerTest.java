@@ -23,6 +23,7 @@ import java.nio.ByteBuffer;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
+import accord.impl.CommandChange;
 import accord.local.Command;
 import accord.primitives.Deps;
 import accord.primitives.KeyDeps;
@@ -32,7 +33,7 @@ import accord.primitives.RoutingKeys;
 import accord.primitives.TxnId;
 import accord.utils.Gen;
 import accord.utils.Gens;
-import accord.utils.SimpleBitSet;
+import accord.utils.LargeBitSet;
 import accord.utils.Utils;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.dht.Murmur3Partitioner;
@@ -68,7 +69,8 @@ public class WaitingOnSerializerTest
             try (DataInputBuffer buf = new DataInputBuffer(bb, true))
             {
                 PartialDeps deps = new PartialDeps(RoutingKeys.EMPTY, KeyDeps.none(waitingOn.keys), waitingOn.directRangeDeps);
-                Command.WaitingOn read = WaitingOnSerializer.deserializeProvider(txnId, buf).provide(txnId, deps, null, 0);
+                CommandChange.WaitingOnBitSets bitSets = WaitingOnSerializer.deserializeBitSets(txnId, buf);
+                Command.WaitingOn read = new Command.WaitingOn(deps.keyDeps.keys(), deps.rangeDeps, bitSets.waitingOn, bitSets.appliedOrInvalidated);
                 Assertions.assertThat(read).isEqualTo(waitingOn);
                 Assertions.assertThat(buf.available()).isEqualTo(0);
             }
@@ -93,8 +95,8 @@ public class WaitingOnSerializerTest
             int txnIdCount = deps.rangeDeps.txnIdCount();
             int keyCount = deps.keyDeps.keys().size();
             int[] selected = Gens.arrays(Gens.ints().between(0, txnIdCount + keyCount - 1)).unique().ofSizeBetween(0, txnIdCount + keyCount).next(rs);
-            SimpleBitSet waitingOn = new SimpleBitSet(txnIdCount + keyCount, false);
-            SimpleBitSet appliedOrInvalidated = rs.nextBoolean() ? null : new SimpleBitSet(txnIdCount, false);
+            LargeBitSet waitingOn = new LargeBitSet(txnIdCount + keyCount, false);
+            LargeBitSet appliedOrInvalidated = rs.nextBoolean() ? null : new LargeBitSet(txnIdCount, false);
             for (int i : selected)
             {
                 WaitingOnSets set = appliedOrInvalidated == null || i >= txnIdCount ? WaitingOnSets.APPLY : sets.next(rs);

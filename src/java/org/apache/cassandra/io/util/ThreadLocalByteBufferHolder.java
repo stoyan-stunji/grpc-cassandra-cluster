@@ -24,6 +24,7 @@ import java.util.EnumMap;
 import io.netty.util.concurrent.FastThreadLocal;
 
 import org.apache.cassandra.io.compress.BufferType;
+import org.apache.cassandra.utils.memory.MemoryUtil;
 
 /**
  * Utility class that allow buffers to be reused by storing them in a thread local instance.
@@ -75,7 +76,7 @@ public final class ThreadLocalByteBufferHolder implements ByteBufferHolder
         ByteBuffer buffer = reusableBB.get();
         if (buffer.capacity() < size)
         {
-            FileUtils.clean(buffer);
+            MemoryUtil.clean(buffer);
             buffer = bufferType.allocate(size);
             reusableBB.set(buffer);
         }
