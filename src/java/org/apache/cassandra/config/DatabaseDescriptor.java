@@ -4423,16 +4423,6 @@ public class DatabaseDescriptor
         return conf.compression_dictionary_cache_expire.toSeconds();
     }
 
-    public static int getCompressionDictionaryTrainingMaxDictionarySize()
-    {
-        return conf.compression_dictionary_training_max_dictionary_size.toBytes();
-    }
-
-    public static int getCompressionDictionaryTrainingMaxTotalSampleSize()
-    {
-        return conf.compression_dictionary_training_max_total_sample_size.toBytes();
-    }
-
     public static boolean getCompressionDictionaryTrainingAutoTrainEnabled()
     {
         return conf.compression_dictionary_training_auto_train_enabled;

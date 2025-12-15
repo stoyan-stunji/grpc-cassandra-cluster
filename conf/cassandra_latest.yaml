@@ -2662,18 +2662,6 @@ compression_dictionary_cache_size: 10
 # Min unit: s
 compression_dictionary_cache_expire: 24h
 
-# Dictionary training configuration (advanced settings)
-# These settings control how compression dictionaries are trained from sample data.
-
-# Maximum size of a trained compression dictionary.
-# Larger dictionaries may provide better compression but use more memory.
-compression_dictionary_training_max_dictionary_size: 64KiB
-
-# Maximum total size of sample data to collect for dictionary training.
-# More sample data generally produces better dictionaries but takes longer to train.
-# The recommended sample size is 100x the dictionary size.
-compression_dictionary_training_max_total_sample_size: 10MiB
-
 # Enable automatic dictionary training based on sampling of write operations.
 # When enabled, the system will automatically collect samples and train new dictionaries.
 # Manual training via nodetool is always available regardless of this setting.
