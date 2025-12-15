@@ -1116,7 +1116,7 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
     public ISSTableScanner getScanner(AbstractBounds<PartitionPosition> bounds)
     {
         PartitionPositionBounds positionBounds = getPositionsForBounds(bounds);
-        return new SSTableSimpleScanner(this, positionBounds == null ? Collections.emptyList() : Collections.singletonList(positionBounds));
+        return new SSTableSimpleScanner(this, positionBounds == null ? Collections.emptyList() : Collections.singletonList(positionBounds), dfile.diskAccessMode());
     }
 
 

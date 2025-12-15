@@ -44,6 +44,7 @@ import org.apache.cassandra.io.compress.CompressionMetadata;
 import org.apache.cassandra.io.sstable.CorruptSSTableException;
 import org.apache.cassandra.io.sstable.metadata.MetadataCollector;
 import org.apache.cassandra.schema.CompressionParams;
+import org.apache.cassandra.utils.memory.MemoryUtil;
 
 import static accord.utils.Property.qt;
 import static org.apache.cassandra.config.CassandraRelevantProperties.JAVA_IO_TMPDIR;
@@ -249,7 +250,7 @@ public class DirectCompressedChunkReaderTest extends CompressedChunkReaderTest
         }
         finally
         {
-            FileUtils.clean(readBuffer);
+            MemoryUtil.clean(readBuffer);
         }
     }
 

@@ -384,16 +384,9 @@ public class FileHandle extends SharedCloseableImpl
             return this;
         }
 
-        /**
-         * Set whether to use mmap for reading
-         *
-         * @param mmapped true if using mmap
-         * @return this instance
-         */
-        public Builder mmapped(boolean mmapped)
+        public Builder mmapped()
         {
-            if (mmapped)
-                withDiskAccessMode(DiskAccessMode.mmap);
+            withDiskAccessMode(DiskAccessMode.mmap);
             return this;
         }
 

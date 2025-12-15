@@ -23,6 +23,7 @@ import java.nio.ByteBuffer;
 import io.netty.util.concurrent.FastThreadLocal;
 import org.agrona.BitUtil;
 import org.agrona.BufferUtil;
+import org.apache.cassandra.utils.memory.MemoryUtil;
 
 public final class DirectThreadLocalByteBufferHolder implements ByteBufferHolder
 {
@@ -55,7 +56,7 @@ public final class DirectThreadLocalByteBufferHolder implements ByteBufferHolder
             return buffer;
         }
 
-        FileUtils.clean(buffer);
+        MemoryUtil.clean(buffer);
         buffer = BufferUtil.allocateDirectAligned(alignedSize, blockSize);
         local.set(buffer);
         return buffer;
