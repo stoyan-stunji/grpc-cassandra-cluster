@@ -81,13 +81,12 @@ public class CompressionDictionaryManager implements CompressionDictionaryManage
         {
             // Initialize components
             this.trainer = ICompressionDictionaryTrainer.create(keyspaceName, tableName,
-                                                                columnFamilyStore.metadata().params.compression,
-                                                                createTrainingConfig());
+                                                                columnFamilyStore.metadata().params.compression);
             trainer.setDictionaryTrainedListener(this::handleNewDictionary);
 
             scheduler.scheduleRefreshTask();
 
-            trainer.start(false);
+            trainer.start(false, createTrainingConfig());
         }
 
         if (registerBookkeeping && isEnabled)
@@ -138,7 +137,7 @@ public class CompressionDictionaryManager implements CompressionDictionaryManage
                     }
                 }
 
-                trainer = ICompressionDictionaryTrainer.create(keyspaceName, tableName, newParams, createTrainingConfig());
+                trainer = ICompressionDictionaryTrainer.create(keyspaceName, tableName, newParams);
                 trainer.setDictionaryTrainedListener(this::handleNewDictionary);
             }
 
@@ -147,7 +146,7 @@ public class CompressionDictionaryManager implements CompressionDictionaryManage
             // Start trainer if it exists
             if (trainer != null)
             {
-                trainer.start(false);
+                trainer.start(false, createTrainingConfig());
             }
             return;
         }
@@ -251,7 +250,7 @@ public class CompressionDictionaryManager implements CompressionDictionaryManage
         logger.info("Starting SSTable-based training for {}.{} with {} SSTables",
                     keyspaceName, tableName, sstables.size());
 
-        trainer.start(true);
+        trainer.start(true, trainingConfig);
         scheduler.scheduleSSTableBasedTraining(trainer, sstables, trainingConfig, force);
     }
 

@@ -344,13 +344,12 @@ public interface CompressionDictionary
             @Override
             public ICompressionDictionaryTrainer createTrainer(String keyspaceName,
                                                                String tableName,
-                                                               CompressionDictionaryTrainingConfig config,
                                                                ICompressor compressor)
             {
                 Preconditions.checkArgument(compressor instanceof ZstdDictionaryCompressor,
                                             "Expected compressor to be ZstdDictionaryCompressor; actual: %s",
                                             compressor.getClass().getSimpleName());
-                return new ZstdDictionaryTrainer(keyspaceName, tableName, config, ((ZstdDictionaryCompressor) compressor).compressionLevel());
+                return new ZstdDictionaryTrainer(keyspaceName, tableName, ((ZstdDictionaryCompressor) compressor).compressionLevel());
             }
         };
 
@@ -377,13 +376,11 @@ public interface CompressionDictionary
          *
          * @param keyspaceName the keyspace name
          * @param tableName the table name
-         * @param config the training configuration
          * @param compressor the compressor to use for training
          * @return a dictionary trainer instance
          */
         public abstract ICompressionDictionaryTrainer createTrainer(String keyspaceName,
                                                                     String tableName,
-                                                                    CompressionDictionaryTrainingConfig config,
                                                                     ICompressor compressor);
     }
 

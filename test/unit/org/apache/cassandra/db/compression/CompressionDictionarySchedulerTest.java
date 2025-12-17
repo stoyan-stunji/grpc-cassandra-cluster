@@ -92,7 +92,7 @@ public class CompressionDictionarySchedulerTest extends CQLTester
         assertThat(sstables).isNotEmpty();
 
         CompressionDictionaryTrainingConfig config = createSampleAllTrainingConfig(cfs);
-        manager.trainer().start(true);
+        manager.trainer().start(true, config);
 
         assertThat(manager.getCurrent()).as("There should be no dictionary at this step").isNull();
         scheduler.scheduleSSTableBasedTraining(manager.trainer(), sstables, config, true);
