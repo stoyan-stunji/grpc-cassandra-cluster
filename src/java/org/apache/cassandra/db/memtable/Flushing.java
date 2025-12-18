@@ -203,7 +203,7 @@ public class Flushing
                             FBUtilities.prettyPrintMemory(bytesFlushed),
                             toFlush.memtable().getFinalCommitLogUpperBound(),
                             durationMs,
-                            bytesFlushed, byteFlushedPerSec,
+                            bytesFlushed, FBUtilities.prettyPrintMemory(byteFlushedPerSec),
                             toFlush.partitionCount(), partitionsPerSec,
                             writer.getTotalRows(), rowsPerSec,
                             startCpuTime < 0 ? "n/a": TimeUnit.NANOSECONDS.toMillis(endCpuTime - startCpuTime),
