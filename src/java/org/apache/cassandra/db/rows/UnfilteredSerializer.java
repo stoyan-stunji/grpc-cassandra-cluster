@@ -233,7 +233,7 @@ public class UnfilteredSerializer
         if ((flags & HAS_ALL_COLUMNS) == 0)
             Columns.serializer.serializeSubset(row.columns(), headerColumns, out);
 
-        SearchIterator<ColumnMetadata, ColumnMetadata> si = helper.iterator(isStatic);
+        SearchIterator<ColumnMetadata, ColumnMetadata> si = helper.header.columnsMayChanged() ? helper.iterator(isStatic) : null;
 
         helper.flags = flags;
         helper.pkLiveness = pkLiveness;
@@ -254,7 +254,7 @@ public class UnfilteredSerializer
 
     private static void serializeColumnData(SerializationHelper helper, ColumnData cd)
     {
-        ColumnMetadata column = helper.si.next(cd.column());
+        ColumnMetadata column = helper.header.columnsMayChanged() ? helper.si.next(cd.column()) : cd.column();
         assert column != null : cd.column.toString();
 
         try

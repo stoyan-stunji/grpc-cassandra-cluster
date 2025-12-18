@@ -245,7 +245,8 @@ public class Flushing
                                             new SerializationHeader(true,
                                                                     flushSet.metadata(),
                                                                     flushSet.columns(),
-                                                                    flushSet.encodingStats()),
+                                                                    flushSet.encodingStats(),
+                                                                    flushSet.columnsChangedAfterCreation()),
                                             txn);
     }
 }
