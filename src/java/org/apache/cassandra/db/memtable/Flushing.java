@@ -172,7 +172,7 @@ public class Flushing
 
                 if (!partition.isEmpty())
                 {
-                    try (UnfilteredRowIterator iter = partition.unfilteredIterator())
+                    try (UnfilteredRowIterator iter = partition.flushingIterator(toFlush.metadata()))
                     {
                         writer.append(iter);
                     }

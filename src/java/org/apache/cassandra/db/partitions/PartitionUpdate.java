@@ -291,6 +291,11 @@ public class PartitionUpdate extends AbstractBTreePartition
         return unfilteredIterator(ColumnFilter.SelectionColumnFilter.all(columns()), Slices.ALL, false);
     }
 
+    public UnfilteredRowIterator flushingIterator(TableMetadata tableMetadata)
+    {
+        throw new UnsupportedOperationException("Flushing iterator should be used only to flush memtable partitions");
+    }
+
 
     public PartitionUpdate withOnlyPresentColumns()
     {

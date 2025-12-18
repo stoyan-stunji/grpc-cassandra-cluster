@@ -68,6 +68,9 @@ public interface Partition
      */
     public UnfilteredRowIterator unfilteredIterator();
 
+    public UnfilteredRowIterator flushingIterator(TableMetadata tableMetadata);
+
+
     /**
      * Returns an UnfilteredRowIterator over the rows/RT contained by this partition
      * selected by the provided slices.
