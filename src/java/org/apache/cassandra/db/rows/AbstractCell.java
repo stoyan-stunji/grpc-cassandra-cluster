@@ -50,7 +50,7 @@ public abstract class AbstractCell<V> extends Cell<V>
 
     public boolean isCounterCell()
     {
-        return !isTombstone() && column.isCounterColumn();
+        return column.isCounterColumn() && !isTombstone();
     }
 
     public boolean isLive(long nowInSec)
