@@ -540,8 +540,14 @@ public class BatchStatement implements CQLStatement.CompositeCQLStatement
                                                    options.getNowInSeconds(state),
                                                    requestTime))
         {
+            // Commit or discard deferred warnings based on whether conditions passed
+            if (result == null)
+                ClientWarn.instance.commitDeferredWarnings();
+            else
+                ClientWarn.instance.discardDeferredWarnings();
+
             // Check for deferred guardrail exception - if conditions passed (result is null)
-            // and we have a stored exception, throw it now
+            // and we have a stored exception, throw it now (AFTER committing warnings)
             if (result == null && casRequest.getStoredGuardrailException() != null)
                 throw GuardrailViolatedException.wrapForDeferredThrow(casRequest.getStoredGuardrailException());
 
@@ -562,6 +568,10 @@ public class BatchStatement implements CQLStatement.CompositeCQLStatement
         DecoratedKey key = null;
         CQL3CasRequest casRequest = null;
         Set<ColumnMetadata> columnsWithConditions = new LinkedHashSet<>();
+
+        // Start deferring warnings during fragment creation - they will be committed
+        // or discarded based on whether conditions pass
+        ClientWarn.instance.startDeferring();
 
         for (int i = 0; i < statements.size(); i++)
         {

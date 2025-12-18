@@ -679,8 +679,14 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
                                                    options.getNowInSeconds(queryState),
                                                    requestTime))
         {
+            // Commit or discard deferred warnings based on whether conditions passed
+            if (result == null)
+                ClientWarn.instance.commitDeferredWarnings();
+            else
+                ClientWarn.instance.discardDeferredWarnings();
+
             // Check for deferred guardrail exception - if conditions passed (result is null)
-            // and we have a stored exception, throw it now
+            // and we have a stored exception, throw it now (AFTER committing warnings)
             if (result == null && request.getStoredGuardrailException() != null)
                 throw GuardrailViolatedException.wrapForDeferredThrow(request.getStoredGuardrailException());
 
@@ -710,6 +716,9 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
 
         addConditions(clustering, request, options);
 
+        // Start deferring warnings during fragment creation - they will be committed
+        // or discarded based on whether conditions pass
+        ClientWarn.instance.startDeferring();
         try
         {
             request.addWriteFragment(this, options, clientState);

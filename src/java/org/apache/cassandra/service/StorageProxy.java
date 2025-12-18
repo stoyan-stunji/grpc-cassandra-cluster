@@ -4268,8 +4268,14 @@ private static ConsensusAttemptResult legacyCas(TableMetadata metadata,
             if (!response.isSuccess())
                 throw response.exception;
 
-            // Check for deferred guardrail exception
-            // If result is null (conditions passed) and we have a stored guardrail exception, throw it
+            // Commit or discard deferred warnings based on whether conditions passed
+            if (response.result == null)
+                ClientWarn.instance.commitDeferredWarnings();
+            else
+                ClientWarn.instance.discardDeferredWarnings();
+
+            // Check for deferred guardrail exception - if conditions passed (result is null)
+            // and we have a stored guardrail exception, throw it now (AFTER committing warnings)
             CQL3CasRequest casRequest = (CQL3CasRequest) request;
             if (response.result == null && casRequest.getStoredGuardrailException() != null)
                 throw GuardrailViolatedException.wrapForDeferredThrow(casRequest.getStoredGuardrailException());
