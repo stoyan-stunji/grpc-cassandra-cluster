@@ -206,7 +206,12 @@ public abstract class AbstractCompactionStrategy
 
     public AbstractCompactionTask getCompactionTask(LifecycleTransaction txn, final long gcBefore, long maxSSTableBytes)
     {
-        return new CompactionTask(cfs, txn, gcBefore);
+        return getCompactionTask(txn, gcBefore, maxSSTableBytes, false);
+    }
+
+    public AbstractCompactionTask getCompactionTask(LifecycleTransaction txn, final long gcBefore, long maxSSTableBytes, boolean latestColumnsOnly)
+    {
+        return new CompactionTask(cfs, txn, gcBefore, latestColumnsOnly);
     }
 
     /**

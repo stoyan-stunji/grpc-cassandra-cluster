@@ -2735,14 +2735,24 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
                                int jobs,
                                String... tableNames) throws IOException, ExecutionException, InterruptedException
     {
-        return rewriteSSTables(keyspaceName, skipIfCurrentVersion, skipIfNewerThanTimestamp, false, jobs, tableNames);
+        return upgradeSSTables(keyspaceName, skipIfCurrentVersion, skipIfNewerThanTimestamp, jobs, false, tableNames);
+    }
+
+    public int upgradeSSTables(String keyspaceName,
+                               final boolean skipIfCurrentVersion,
+                               final long skipIfNewerThanTimestamp,
+                               int jobs,
+                               boolean latestColumnsOnly,
+                               String... tableNames) throws IOException, ExecutionException, InterruptedException
+    {
+        return rewriteSSTables(keyspaceName, skipIfCurrentVersion, skipIfNewerThanTimestamp, false, jobs, latestColumnsOnly, tableNames);
     }
 
     public int recompressSSTables(String keyspaceName,
                                   int jobs,
                                   String... tableNames) throws IOException, ExecutionException, InterruptedException
     {
-        return rewriteSSTables(keyspaceName, false, Long.MAX_VALUE, true, jobs, tableNames);
+        return rewriteSSTables(keyspaceName, false, Long.MAX_VALUE, true, jobs, false, tableNames);
     }
 
 
@@ -2751,13 +2761,14 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
                                final long skipIfNewerThanTimestamp,
                                final boolean skipIfCompressionMatches,
                                int jobs,
+                               boolean latestColumnsOnly,
                                String... tableNames) throws IOException, ExecutionException, InterruptedException
     {
         CompactionManager.AllSSTableOpStatus status = CompactionManager.AllSSTableOpStatus.SUCCESSFUL;
         logger.info("Starting {} on {}.{}", OperationType.UPGRADE_SSTABLES, keyspaceName, Arrays.toString(tableNames));
         for (ColumnFamilyStore cfStore : getValidColumnFamilies(true, true, keyspaceName, tableNames))
         {
-            CompactionManager.AllSSTableOpStatus oneStatus = cfStore.sstablesRewrite(skipIfCurrentVersion, skipIfNewerThanTimestamp, skipIfCompressionMatches, jobs);
+            CompactionManager.AllSSTableOpStatus oneStatus = cfStore.sstablesRewrite(skipIfCurrentVersion, skipIfNewerThanTimestamp, skipIfCompressionMatches, jobs, latestColumnsOnly);
             if (oneStatus != CompactionManager.AllSSTableOpStatus.SUCCESSFUL)
                 status = oneStatus;
         }

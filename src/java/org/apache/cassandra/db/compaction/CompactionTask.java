@@ -81,9 +81,15 @@ public class CompactionTask extends AbstractCompactionTask
         this(cfs, txn, gcBefore, false);
     }
 
-    public CompactionTask(ColumnFamilyStore cfs, ILifecycleTransaction txn, long gcBefore, boolean keepOriginals)
+    public CompactionTask(ColumnFamilyStore cfs, ILifecycleTransaction txn, long gcBefore, boolean latestColumnsOnly)
     {
-        super(cfs, txn);
+        this(cfs, txn, gcBefore, false, latestColumnsOnly);
+    }
+
+
+    public CompactionTask(ColumnFamilyStore cfs, ILifecycleTransaction txn, long gcBefore, boolean keepOriginals, boolean latestColumnsOnly)
+    {
+        super(cfs, txn, latestColumnsOnly);
         this.gcBefore = gcBefore;
         this.keepOriginals = keepOriginals;
     }
@@ -350,7 +356,7 @@ public class CompactionTask extends AbstractCompactionTask
                                                           ILifecycleTransaction transaction,
                                                           Set<SSTableReader> nonExpiredSSTables)
     {
-        return new DefaultCompactionWriter(cfs, directories, transaction, nonExpiredSSTables, keepOriginals, getLevel());
+        return new DefaultCompactionWriter(cfs, directories, transaction, nonExpiredSSTables, keepOriginals, getLevel(), latestColumnsOnly);
     }
 
     public static String updateCompactionHistory(TimeUUID taskId, String keyspaceName, String columnFamilyName, long[] mergedRowCounts, long startSize, long endSize, Map<String, String> compactionProperties)

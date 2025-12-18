@@ -477,7 +477,15 @@ public interface StorageServiceMBean extends NotificationEmitter
         return upgradeSSTables(keyspaceName, excludeCurrentVersion, Long.MAX_VALUE, jobs, tableNames);
     }
 
-    public int upgradeSSTables(String keyspaceName, boolean excludeCurrentVersion, long maxSSTableTimestamp, int jobs, String... tableNames) throws IOException, ExecutionException, InterruptedException;
+    @Deprecated(since = "5.1")
+    /** @deprecated See CASSANDRA-21000 */
+    default int upgradeSSTables(String keyspaceName, boolean excludeCurrentVersion, long maxSSTableTimestamp, int jobs, String... tableNames) throws IOException, ExecutionException, InterruptedException
+    {
+        return upgradeSSTables(keyspaceName, excludeCurrentVersion, maxSSTableTimestamp, jobs, false, tableNames);
+    }
+
+    public int upgradeSSTables(String keyspaceName, boolean excludeCurrentVersion, long maxSSTableTimestamp, int jobs, boolean latestColumnsOnly, String... tableNames) throws IOException, ExecutionException, InterruptedException;
+
     public int recompressSSTables(String keyspaceName, int jobs, String... tableNames) throws IOException, ExecutionException, InterruptedException;
 
     /**

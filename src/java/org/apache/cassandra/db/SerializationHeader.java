@@ -76,7 +76,7 @@ public class SerializationHeader
         return new SerializationHeader(true, metadata, metadata.regularAndStaticColumns(), EncodingStats.NO_STATS);
     }
 
-    public static SerializationHeader make(TableMetadata metadata, Collection<SSTableReader> sstables)
+    public static SerializationHeader make(TableMetadata metadata, Collection<SSTableReader> sstables, boolean latestColumnsOnly)
     {
         // The serialization header has to be computed before the start of compaction (since it's used to write)
         // the result. This means that when compacting multiple sources, we won't have perfectly accurate stats
@@ -91,14 +91,31 @@ public class SerializationHeader
         EncodingStats.Collector stats = new EncodingStats.Collector();
         RegularAndStaticColumns.Builder columns = RegularAndStaticColumns.builder();
         // We need to order the SSTables by descending generation to be sure that we use latest column metadata.
-        for (SSTableReader sstable : orderByDescendingGeneration(sstables))
+
+        Collection<SSTableReader> ssTableReaders = orderByDescendingGeneration(sstables);
+
+        for (SSTableReader sstable : ssTableReaders)
         {
             stats.updateTimestamp(sstable.getMinTimestamp());
             stats.updateLocalDeletionTime(sstable.getMinLocalDeletionTime());
             stats.updateTTL(sstable.getMinTTL());
-            columns.addAll(sstable.header.columns());
+        }
+
+        if (latestColumnsOnly)
+        {
+            columns.addAll(metadata.regularAndStaticColumns());
+        }
+        else
+        {
+            for (SSTableReader sstable : ssTableReaders)
+                columns.addAll(sstable.header.columns());
         }
         return new SerializationHeader(true, metadata, columns.build(), stats.get());
+    }
+
+    public static SerializationHeader make(TableMetadata metadata, Collection<SSTableReader> sstables)
+    {
+        return make(metadata, sstables, false);
     }
 
     private static Collection<SSTableReader> orderByDescendingGeneration(Collection<SSTableReader> sstables)

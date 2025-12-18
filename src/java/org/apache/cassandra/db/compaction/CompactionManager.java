@@ -110,6 +110,7 @@ import org.apache.cassandra.metrics.CompactionMetrics;
 import org.apache.cassandra.metrics.TableMetrics;
 import org.apache.cassandra.repair.NoSuchRepairSessionException;
 import org.apache.cassandra.schema.CompactionParams.TombstoneOption;
+import org.apache.cassandra.schema.DroppedColumn;
 import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.service.ActiveRepairService;
@@ -699,9 +700,22 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
                                                     final boolean skipIfCurrentVersion,
                                                     final long skipIfOlderThanTimestamp,
                                                     final boolean skipIfCompressionMatches,
-                                                    int jobs) throws InterruptedException, ExecutionException
+                                                    int jobs,
+                                                    boolean latestColumnsOnly) throws InterruptedException, ExecutionException
     {
         return performSSTableRewrite(cfs, (sstable) -> {
+            // Should we remove dropped columns from header?
+            if (latestColumnsOnly)
+            {
+                for (DroppedColumn droppedColumn : cfs.metadata().droppedColumns.values())
+                {
+                    if (sstable.header.columns().contains(droppedColumn.column))
+                    {
+                        return true;
+                    }
+                }
+            }
+
             // Skip if descriptor version matches current version
             if (skipIfCurrentVersion && sstable.descriptor.version.equals(sstable.descriptor.getFormat().getLatestVersion()))
                 return false;
@@ -718,7 +732,7 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
                 return false;
 
             return true;
-        }, jobs);
+        }, jobs, latestColumnsOnly);
     }
 
     /**
@@ -726,7 +740,7 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
 
      * @param sstableFilter sstables for which predicate returns {@link false} will be excluded
      */
-    public AllSSTableOpStatus performSSTableRewrite(final ColumnFamilyStore cfs, Predicate<SSTableReader> sstableFilter, int jobs) throws InterruptedException, ExecutionException
+    public AllSSTableOpStatus performSSTableRewrite(final ColumnFamilyStore cfs, Predicate<SSTableReader> sstableFilter, int jobs, boolean latestColumnsOnly) throws InterruptedException, ExecutionException
     {
         return parallelAllSSTableOperation(cfs, new OneSSTableOperation()
         {
@@ -751,7 +765,7 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
             @Override
             public void execute(LifecycleTransaction txn)
             {
-                AbstractCompactionTask task = cfs.getCompactionStrategyManager().getCompactionTask(txn, NO_GC, Long.MAX_VALUE);
+                AbstractCompactionTask task = cfs.getCompactionStrategyManager().getCompactionTask(txn, NO_GC, Long.MAX_VALUE, latestColumnsOnly);
                 task.setUserDefined(true);
                 task.setCompactionType(OperationType.UPGRADE_SSTABLES);
                 task.execute(active);

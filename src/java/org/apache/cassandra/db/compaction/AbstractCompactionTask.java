@@ -35,17 +35,29 @@ public abstract class AbstractCompactionTask extends WrappedRunnable
     protected ILifecycleTransaction transaction;
     protected boolean isUserDefined;
     protected OperationType compactionType;
+    protected final boolean latestColumnsOnly;
 
     /**
-     * @param cfs
+     * @param cfs column family of this compaction task
      * @param transaction the modifying managing the status of the sstables we're replacing
      */
     public AbstractCompactionTask(ColumnFamilyStore cfs, ILifecycleTransaction transaction)
+    {
+        this(cfs, transaction, false);
+    }
+
+    /**
+     * @param cfs column family of this compaction task
+     * @param transaction the modifying managing the status of the sstables we're replacing
+     * @param latestColumnsOnly true if compaction should produce SSTables without e.g. dropped columns in serialisation header
+     */
+    public AbstractCompactionTask(ColumnFamilyStore cfs, ILifecycleTransaction transaction, boolean latestColumnsOnly)
     {
         this.cfs = cfs;
         this.transaction = transaction;
         this.isUserDefined = false;
         this.compactionType = OperationType.COMPACTION;
+        this.latestColumnsOnly = latestColumnsOnly;
 
         try
         {
