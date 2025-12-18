@@ -239,15 +239,6 @@ public class AsyncProfilerService implements AsyncProfilerMBean
         }
     }
 
-    private void validateStartParameters(Map<String, String> parameters)
-    {
-        if (!ASYNC_PROFILER_START_PARAMS.equals(parameters.keySet()))
-        {
-            throw new IllegalArgumentException("Wrong parameters passed to start async profiler method. Passed parameters" +
-                                               " should be: " + ASYNC_PROFILER_START_PARAMS);
-        }
-    }
-
     @Override
     public synchronized boolean stop(Map<String, String> parameters)
     {
@@ -293,12 +284,6 @@ public class AsyncProfilerService implements AsyncProfilerMBean
             logger.error("Failed to stop Async-Profiler", e);
             return false;
         }
-    }
-
-    private void validateStopParameters(Map<String, String> parameters)
-    {
-        // With current implementation, the only parameter for output filename is optional. There is nothing else to
-        // validate. This method exists here for completion and to keep the same pattern that we have on the start method.
     }
 
     @Override
@@ -441,6 +426,24 @@ public class AsyncProfilerService implements AsyncProfilerMBean
         catch (Throwable t)
         {
             throw new RuntimeException("Unable to create directory " + logDir);
+        }
+    }
+
+    private void validateStartParameters(Map<String, String> parameters)
+    {
+        if (!ASYNC_PROFILER_START_PARAMS.equals(parameters.keySet()))
+        {
+            throw new IllegalArgumentException("Wrong parameters passed to start async profiler method. Passed parameters" +
+                                               " should be: " + ASYNC_PROFILER_START_PARAMS);
+        }
+    }
+
+    private void validateStopParameters(Map<String, String> parameters)
+    {
+        if (!ASYNC_PROFILER_STOP_PARAMS.containsAll(parameters.keySet()))
+        {
+            throw new IllegalArgumentException("Wrong parameters passed to stop async profiler method. Passed parameters" +
+                                               " should be: " + ASYNC_PROFILER_STOP_PARAMS);
         }
     }
 

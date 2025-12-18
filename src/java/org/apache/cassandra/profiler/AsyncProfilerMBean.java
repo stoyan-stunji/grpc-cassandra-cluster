@@ -22,12 +22,27 @@ import java.io.IOException;
 import java.util.List;
 import java.util.Map;
 
+import org.apache.cassandra.config.CassandraRelevantProperties;
+import org.apache.cassandra.config.DurationSpec;
+import org.apache.cassandra.service.AsyncProfilerService.AsyncProfilerEvent;
+import org.apache.cassandra.service.AsyncProfilerService.AsyncProfilerFormat;
+
 public interface AsyncProfilerMBean
 {
     String MBEAN_NAME = "org.apache.cassandra.profiler:type=AsyncProfiler";
 
     /**
      * Starts profiling.
+     *
+     * As of now, valid keys to the map area:
+     * <p>
+     *   <ul>
+     *     <li>events - comma separated list of {@link AsyncProfilerEvent}</li>
+     *     <li>outputFormat - one of {@link AsyncProfilerFormat}</li>
+     *     <li>duration - duration of profiling, a string, in human-friendly form, see {@link DurationSpec.IntSecondsBound}</li>
+     *     <li>outputFileName - simple name of a file to save results to, under {@link CassandraRelevantProperties#LOG_DIR}/profiler directory</li>
+     *   </ul>
+     * </p>
      *
      * @param parameters     Parameters for start command
      * @return true if profiling has started, false when not (e.g. when it was started already)
@@ -36,6 +51,13 @@ public interface AsyncProfilerMBean
 
     /**
      * Stops profiling.
+     *
+     * As of now, valid keys to the map are:
+     * <p>
+     *   <ul>
+     *     <li>outputFileName - simple file name where to store profiling result, optional</li>
+     *   </ul>
+     * </p>
      *
      * @param parameters     Parameters for stop command
      * @return true if profiling was stopped

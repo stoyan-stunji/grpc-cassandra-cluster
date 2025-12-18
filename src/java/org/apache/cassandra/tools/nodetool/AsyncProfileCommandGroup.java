@@ -135,7 +135,7 @@ public class AsyncProfileCommandGroup extends AbstractCommand
                 Map<String, String> startParameters = Map.of(ASYNC_PROFILER_START_EVENTS_PARAM, event.stream().map(Enum::name).collect(joining(",")),
                                                              ASYNC_PROFILER_START_OUTPUT_FORMAT_PARAM, outputFormat.name(),
                                                              ASYNC_PROFILER_START_DURATION_PARAM, duration,
-                                                             ASYNC_PROFILER_START_OUTPUT_FILE_NAME_PARAM, filename);
+                                                             ASYNC_PROFILER_START_OUTPUT_FILE_NAME_PARAM, validateOutputFileName(filename));
                 if (!profiler.start(startParameters))
                 {
                     output.err.println("Profiler has already started or there was a failure to start it.");
@@ -157,7 +157,7 @@ public class AsyncProfileCommandGroup extends AbstractCommand
         {
             doWithProfiler(probe, profiler -> {
                 String file = filename != null ? validateOutputFileName(filename) : null;
-                Map<String, String> stopParameters = Map.of(ASYNC_PROFILER_STOP_OUTPUT_FILE_NAME_PARAM, file);
+                Map<String, String> stopParameters = file == null ? Map.of() : Map.of(ASYNC_PROFILER_STOP_OUTPUT_FILE_NAME_PARAM, file);
                 if (!profiler.stop(stopParameters))
                 {
                     output.err.println("Profiler has already stopped or there was a failure to stop it.");
