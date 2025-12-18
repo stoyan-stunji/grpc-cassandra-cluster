@@ -55,7 +55,7 @@ public abstract class AbstractCell<V> extends Cell<V>
 
     public boolean isLive(long nowInSec)
     {
-        return localDeletionTime() == NO_DELETION_TIME || (ttl() != NO_TTL && nowInSec < localDeletionTime());
+        return isLive(nowInSec, localDeletionTime(), ttl());
     }
 
     public boolean isTombstone()

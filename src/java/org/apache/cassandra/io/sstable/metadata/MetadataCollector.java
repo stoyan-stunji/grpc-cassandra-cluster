@@ -39,6 +39,7 @@ import org.apache.cassandra.db.Slice;
 import org.apache.cassandra.db.commitlog.CommitLogPosition;
 import org.apache.cassandra.db.commitlog.IntervalSet;
 import org.apache.cassandra.db.partitions.PartitionStatisticsCollector;
+import org.apache.cassandra.db.rows.ArrayCell;
 import org.apache.cassandra.db.rows.Cell;
 import org.apache.cassandra.db.rows.Unfiltered;
 import org.apache.cassandra.io.sstable.SSTable;
@@ -245,10 +246,27 @@ public class MetadataCollector implements PartitionStatisticsCollector
     public void update(Cell<?> cell)
     {
         ++currentPartitionCells;
-        updateTimestamp(cell.timestamp());
-        updateTTL(cell.ttl());
-        updateLocalDeletionTime(cell.localDeletionTime());
-        if (!cell.isLive(nowInSec))
+        long timestamp;
+        int ttl;
+        long localDeletionTime;
+        if (cell.getClass() == ArrayCell.class)
+        {
+            timestamp = cell.timestamp();
+            ttl = cell.ttl();
+            localDeletionTime = cell.localDeletionTime();
+        }
+        else
+        {
+            timestamp = cell.timestamp();
+            ttl = cell.ttl();
+            localDeletionTime = cell.localDeletionTime();
+        }
+        updateTimestamp(timestamp);
+        updateTTL(ttl);
+        updateLocalDeletionTime(localDeletionTime);
+
+        // isLive(nowInSec) is not used to avoid additional non-monomorphic calls of Cell methods
+        if (!cell.isLive(nowInSec, localDeletionTime, ttl))
             updateTombstoneCount();
     }
 

@@ -177,6 +177,11 @@ public abstract class Cell<V> extends ColumnData
      */
     public abstract boolean isLive(long nowInSec);
 
+    public final boolean isLive(long nowInSec, long localDeletionTime, int ttl)
+    {
+        return localDeletionTime == NO_DELETION_TIME || ttl != NO_TTL && nowInSec < localDeletionTime;
+    }
+
     /**
      * For cells belonging to complex types (non-frozen collection and UDT), the
      * path to the cell.
