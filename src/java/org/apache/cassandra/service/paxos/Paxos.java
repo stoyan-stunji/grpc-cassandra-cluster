@@ -764,6 +764,15 @@ public class Paxos
 
                 Proposal proposal;
                 boolean conditionMet = request.appliesTo(current);
+
+                // Condition check only mode - if conditions are met, return success without applying updates
+                // This is used for deferred guardrail exception handling
+                if (conditionMet && request.isConditionCheckOnly())
+                {
+                    Tracing.trace("CAS condition-check-only: precondition is met; returning success without updates");
+                    return casResult(null);
+                }
+
                 if (!conditionMet)
                 {
                     if (getPaxosVariant() == v2_without_linearizable_reads_or_rejected_writes)

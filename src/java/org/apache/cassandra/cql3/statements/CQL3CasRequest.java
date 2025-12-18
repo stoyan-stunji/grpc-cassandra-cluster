@@ -54,6 +54,7 @@ import org.apache.cassandra.db.filter.RowFilter;
 import org.apache.cassandra.db.partitions.FilteredPartition;
 import org.apache.cassandra.db.partitions.PartitionUpdate;
 import org.apache.cassandra.db.rows.Row;
+import org.apache.cassandra.db.guardrails.GuardrailViolatedException;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.index.IndexRegistry;
 import org.apache.cassandra.io.IVersionedSerializer;
@@ -117,6 +118,14 @@ public class CQL3CasRequest implements CASRequest
 
     private final List<TxnWrite.Fragment> writeFragments = new ArrayList<>();
 
+    // For deferred guardrail exception handled after condition check
+    // When guardrails fail during fragment creation, we store the exception and only throw it
+    // if conditions pass. This is NOT serialized.
+    private transient GuardrailViolatedException storedGuardrailException;
+    // Indicate that if this CQL3CasRequest is forwarded it should only perform the condition check
+    // and not apply the updates because a guardrail failure already happened
+    private boolean conditionCheckOnly;
+
     public CQL3CasRequest(TableMetadata metadata,
                           DecoratedKey key,
                           RegularAndStaticColumns conditionColumns,
@@ -145,6 +154,32 @@ public class CQL3CasRequest implements CASRequest
         TxnWrite.Fragment fragment = stmt.forTxn().getTxnWriteFragment(
             writeFragments.size(), clientState, options, partitionKey);
         writeFragments.add(fragment);
+    }
+
+    /**
+     * Check if this request is in condition-check-only mode.
+     * When true, the replica should only check conditions without executing the mutation.
+     */
+    public boolean isConditionCheckOnly()
+    {
+        return conditionCheckOnly;
+    }
+
+    /**
+     * Get the stored guardrail exception. Only valid when conditionCheckOnly is true.
+     */
+    public GuardrailViolatedException getStoredGuardrailException()
+    {
+        return storedGuardrailException;
+    }
+
+    /**
+     * Store a guardrail exception for deferred throwing.
+     */
+    public void setStoredGuardrailException(GuardrailViolatedException e)
+    {
+        storedGuardrailException = e;
+        conditionCheckOnly = true;
     }
 
     public void addNotExist(Clustering<?> clustering) throws InvalidRequestException
@@ -487,6 +522,7 @@ public class CQL3CasRequest implements CASRequest
         return updatesRegularRows == that.updatesRegularRows &&
                updatesStaticRow == that.updatesStaticRow &&
                hasExists == that.hasExists &&
+               conditionCheckOnly == that.conditionCheckOnly &&
                Objects.equals(metadata.id, that.metadata.id) && // Compare table IDs instead of full metadata
                Objects.equals(key, that.key) &&
                Objects.equals(conditionColumns, that.conditionColumns) &&
@@ -499,7 +535,7 @@ public class CQL3CasRequest implements CASRequest
     public int hashCode()
     {
         return Objects.hash(metadata.id, key, conditionColumns, updatesRegularRows, updatesStaticRow,
-                           hasExists, staticConditions, conditions, writeFragments);
+                           hasExists, conditionCheckOnly, staticConditions, conditions, writeFragments);
     }
 
     @Override
@@ -580,7 +616,8 @@ public class CQL3CasRequest implements CASRequest
             // Serialize boolean flags as bit field
             byte flags = (byte) ((request.updatesRegularRows ? 0x01 : 0) |
                                 (request.updatesStaticRow ? 0x02 : 0) |
-                                (request.hasExists ? 0x04 : 0));
+                                (request.hasExists ? 0x04 : 0) |
+                                (request.conditionCheckOnly ? 0x08 : 0));
             out.writeByte(flags);
 
             // Serialize static conditions (nullable RowCondition)
@@ -625,11 +662,13 @@ public class CQL3CasRequest implements CASRequest
             boolean updatesRegularRows = (flags & 0x01) != 0;
             boolean updatesStaticRow = (flags & 0x02) != 0;
             boolean hasExists = (flags & 0x04) != 0;
+            boolean conditionCheckOnly = (flags & 0x08) != 0;
 
             // Create the CQL3CasRequest
             CQL3CasRequest request = new CQL3CasRequest(metadata, key, conditionColumns,
                                                       updatesRegularRows, updatesStaticRow);
             request.hasExists = hasExists;
+            request.conditionCheckOnly = conditionCheckOnly;
 
             // Deserialize static conditions
             request.staticConditions = deserializeRowCondition(in, version, metadata, Clustering.STATIC_CLUSTERING);

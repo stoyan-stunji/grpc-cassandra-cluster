@@ -91,6 +91,7 @@ import org.apache.cassandra.db.partitions.PartitionUpdate;
 import org.apache.cassandra.db.partitions.UnfilteredPartitionIterator;
 import org.apache.cassandra.db.rows.RowIterator;
 import org.apache.cassandra.db.view.ViewUtils;
+import org.apache.cassandra.db.guardrails.GuardrailViolatedException;
 import org.apache.cassandra.dht.AbstractBounds;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.exceptions.CasWriteTimeoutException;
@@ -516,6 +517,14 @@ private static ConsensusAttemptResult legacyCas(TableMetadata metadata,
                     Tracing.trace("CAS precondition does not match current values {}", current);
                     casWriteMetrics.conditionNotMet.inc();
                     return Pair.create(PartitionUpdate.emptyUpdate(metadata, key), current.rowIterator(false));
+                }
+
+                // Condition check only mode - if conditions are met, return success without making updates
+                // This is used for deferred guardrail exception handling
+                if (request.isConditionCheckOnly())
+                {
+                    Tracing.trace("CAS condition-check-only: precondition is met; returning success without updates");
+                    return Pair.create(PartitionUpdate.emptyUpdate(metadata, key), null);
                 }
 
                 // Create the desired updates
@@ -4258,6 +4267,12 @@ private static ConsensusAttemptResult legacyCas(TableMetadata metadata,
             // Check if the forwarded operation had an exception
             if (!response.isSuccess())
                 throw response.exception;
+
+            // Check for deferred guardrail exception
+            // If result is null (conditions passed) and we have a stored guardrail exception, throw it
+            CQL3CasRequest casRequest = (CQL3CasRequest) request;
+            if (response.result == null && casRequest.getStoredGuardrailException() != null)
+                throw GuardrailViolatedException.wrapForDeferredThrow(casRequest.getStoredGuardrailException());
 
             return response.result;
         }

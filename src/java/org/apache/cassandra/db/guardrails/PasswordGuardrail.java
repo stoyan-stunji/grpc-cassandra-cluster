@@ -95,5 +95,11 @@ public class PasswordGuardrail extends CustomGuardrail<String>
             super(message);
             this.redactedMessage = redactedMessage;
         }
+
+        PasswordGuardrailException(String message, String redactedMessage, Throwable cause)
+        {
+            super(message, cause);
+            this.redactedMessage = redactedMessage;
+        }
     }
 }

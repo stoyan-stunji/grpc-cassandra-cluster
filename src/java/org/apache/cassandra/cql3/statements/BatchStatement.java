@@ -59,6 +59,7 @@ import org.apache.cassandra.db.ReadCommand.PotentialTxnConflicts;
 import org.apache.cassandra.db.RegularAndStaticColumns;
 import org.apache.cassandra.db.Slices;
 import org.apache.cassandra.db.guardrails.Guardrails;
+import org.apache.cassandra.db.guardrails.GuardrailViolatedException;
 import org.apache.cassandra.db.partitions.PartitionUpdate;
 import org.apache.cassandra.db.rows.RowIterator;
 import org.apache.cassandra.exceptions.InvalidRequestException;
@@ -539,6 +540,11 @@ public class BatchStatement implements CQLStatement.CompositeCQLStatement
                                                    options.getNowInSeconds(state),
                                                    requestTime))
         {
+            // Check for deferred guardrail exception - if conditions passed (result is null)
+            // and we have a stored exception, throw it now
+            if (result == null && casRequest.getStoredGuardrailException() != null)
+                throw GuardrailViolatedException.wrapForDeferredThrow(casRequest.getStoredGuardrailException());
+
             return new ResultMessage.Rows(ModificationStatement.buildCasResultSet(ksName,
                                                                                   tableName,
                                                                                   result,
@@ -589,7 +595,19 @@ public class BatchStatement implements CQLStatement.CompositeCQLStatement
                 if (slices.isEmpty())
                     continue;
 
-                casRequest.addWriteFragment(statement, statementOptions, state.getClientState());
+                // Skip if we're already in condition-check-only mode due to a previous guardrail failure
+                if (casRequest.isConditionCheckOnly())
+                    continue;
+
+                try
+                {
+                    casRequest.addWriteFragment(statement, statementOptions, state.getClientState());
+                }
+                catch (GuardrailViolatedException e)
+                {
+                    // Guardrail failure - defer until conditions are checked
+                    casRequest.setStoredGuardrailException(e);
+                }
             }
             else
             {
@@ -603,7 +621,20 @@ public class BatchStatement implements CQLStatement.CompositeCQLStatement
                     else if (columnsWithConditions != null)
                         Iterables.addAll(columnsWithConditions, statement.getColumnsWithConditions());
                 }
-                casRequest.addWriteFragment(statement, statementOptions, state.getClientState());
+
+                // Skip if we're already in condition-check-only mode due to a previous guardrail failure
+                if (casRequest.isConditionCheckOnly())
+                    continue;
+
+                try
+                {
+                    casRequest.addWriteFragment(statement, statementOptions, state.getClientState());
+                }
+                catch (GuardrailViolatedException e)
+                {
+                    // Guardrail failure - defer until conditions are checked
+                    casRequest.setStoredGuardrailException(e);
+                }
             }
         }
 

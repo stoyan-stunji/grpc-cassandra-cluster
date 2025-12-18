@@ -65,6 +65,13 @@ public class CasForwardResponse
         this.warnings = warnings;
     }
 
+    private CasForwardResponse(RowIterator result, CassandraException exception, List<String> warnings)
+    {
+        this.result = result;
+        this.exception = exception;
+        this.warnings = warnings;
+    }
+
     public boolean isSuccess()
     {
         return exception == null;
@@ -153,10 +160,7 @@ public class CasForwardResponse
                 }
             }
 
-            if (hasException)
-                return new CasForwardResponse(exception, warnings);
-            else
-                return new CasForwardResponse(result, warnings);
+            return new CasForwardResponse(result, exception, warnings);
         }
 
         @Override

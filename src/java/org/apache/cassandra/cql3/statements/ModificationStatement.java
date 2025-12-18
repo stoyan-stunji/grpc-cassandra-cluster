@@ -97,6 +97,7 @@ import org.apache.cassandra.db.partitions.PartitionUpdate;
 import org.apache.cassandra.db.rows.RowIterator;
 import org.apache.cassandra.db.view.View;
 import org.apache.cassandra.dht.Token;
+import org.apache.cassandra.db.guardrails.GuardrailViolatedException;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.exceptions.RequestExecutionException;
 import org.apache.cassandra.exceptions.RequestValidationException;
@@ -112,6 +113,7 @@ import org.apache.cassandra.schema.SchemaConstants;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.schema.ViewMetadata;
 import org.apache.cassandra.service.ClientState;
+import org.apache.cassandra.service.ClientWarn;
 import org.apache.cassandra.service.PreserveTimestamp;
 import org.apache.cassandra.service.QueryState;
 import org.apache.cassandra.service.StorageProxy;
@@ -677,6 +679,11 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
                                                    options.getNowInSeconds(queryState),
                                                    requestTime))
         {
+            // Check for deferred guardrail exception - if conditions passed (result is null)
+            // and we have a stored exception, throw it now
+            if (result == null && request.getStoredGuardrailException() != null)
+                throw GuardrailViolatedException.wrapForDeferredThrow(request.getStoredGuardrailException());
+
             return new ResultMessage.Rows(buildCasResultSet(result, queryState, options));
         }
     }
@@ -702,7 +709,16 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
         CQL3CasRequest request = new CQL3CasRequest(metadata(), key, conditionColumns(), updatesRegularRows(), updatesStaticRow());
 
         addConditions(clustering, request, options);
-        request.addWriteFragment(this, options, clientState);
+
+        try
+        {
+            request.addWriteFragment(this, options, clientState);
+        }
+        catch (GuardrailViolatedException e)
+        {
+            // Guardrail failure - defer until conditions are checked
+            request.setStoredGuardrailException(e);
+        }
 
         return request;
     }
@@ -867,6 +883,11 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
 
         if (!request.appliesTo(current))
             return current.rowIterator(false);
+
+        // Condition check only mode - if conditions are met, return success without applying updates
+        // This is used for deferred guardrail exception handling
+        if (request.isConditionCheckOnly())
+            return null;
 
         PartitionUpdate updates = request.makeUpdates(current, state, ballot);
         updates = TriggerExecutor.instance.execute(updates);
