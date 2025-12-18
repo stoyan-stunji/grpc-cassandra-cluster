@@ -145,8 +145,20 @@ public abstract class SortedTableWriter<P extends SortedTablePartitionWriter, I 
             if (header.hasStatic())
                 addStaticRow(partition.partitionKey(), partition.staticRow());
 
-            while (partition.hasNext())
-                addUnfiltered(partition.partitionKey(), partition.next());
+            int i = 0;
+            boolean hasNext = false;
+            while (hasNext || partition.hasNext())
+            {
+                Unfiltered current = partition.next();
+                hasNext = partition.hasNext();
+                boolean isRowFirstOrLast;
+                if (i == 0)
+                    isRowFirstOrLast = true;
+                else
+                    isRowFirstOrLast = !hasNext;
+                addUnfiltered(partition.partitionKey(), current, isRowFirstOrLast);
+                i++;
+            }
 
             indexEntry = endPartition(partition.partitionKey(), partition.partitionLevelDeletion());
 
@@ -197,20 +209,21 @@ public abstract class SortedTableWriter<P extends SortedTablePartitionWriter, I 
         onStaticRow(row);
     }
 
-    private void addUnfiltered(DecoratedKey key, Unfiltered unfiltered) throws IOException
+    private void addUnfiltered(DecoratedKey key, Unfiltered unfiltered, boolean isRowFirstOrLast) throws IOException
     {
         if (unfiltered.isRow())
-            addRow(key, (Row) unfiltered);
+            addRow(key, (Row) unfiltered, isRowFirstOrLast);
         else
             addRangeTomstoneMarker((RangeTombstoneMarker) unfiltered);
     }
 
-    private void addRow(DecoratedKey key, Row row) throws IOException
+    private void addRow(DecoratedKey key, Row row, boolean isRowFirstOrLast) throws IOException
     {
         guardCollectionSize(key, row);
 
         partitionWriter.addUnfiltered(row);
-        metadataCollector.updateClusteringValues(row.clustering());
+        if (isRowFirstOrLast)
+            metadataCollector.updateClusteringValues(row.clustering());
         Rows.collectStats(row, metadataCollector);
 
         onRow(row);
