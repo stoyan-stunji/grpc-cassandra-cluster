@@ -252,6 +252,8 @@ public abstract class AbstractMemtable implements Memtable
             {
                 EncodingStats current = stats.get();
                 EncodingStats updated = current.mergeWith(newStats);
+                if (current == updated)
+                    return;
                 if (stats.compareAndSet(current, updated))
                     return;
             }
