@@ -764,6 +764,22 @@ public class StartupChecks
                                               "Try 'sysctl kernel.perf_event_paranoid=1' and 'sysctl kernel.kptr_restrict=0' or its " +
                                               "variation on your system to resolve the issue.";
 
+        protected int readPerfEventParanoid()
+        {
+            List<String> lines = FileUtils.readLines(new File("/proc/sys/kernel/perf_event_paranoid"));
+            if (!lines.isEmpty())
+                return Integer.parseInt(lines.get(0));
+            return Integer.MIN_VALUE;
+        }
+
+        protected int readKptrRestrict()
+        {
+            List<String> lines = FileUtils.readLines(new File("/proc/sys/kernel/kptr_restrict"));
+            if (!lines.isEmpty())
+                return Integer.parseInt(lines.get(0));
+            return Integer.MIN_VALUE;
+        }
+
         public void execute(StartupChecksOptions startupChecksOptions, boolean shouldThrow)
         {
             try
@@ -771,15 +787,8 @@ public class StartupChecks
                 if (!CassandraRelevantProperties.ASYNC_PROFILER_ENABLED.getBoolean())
                     return;
 
-                List<String> perfEventParanoidLines = FileUtils.readLines(new File("/proc/sys/kernel/perf_event_paranoid"));
-                int perfEventParanoid = Integer.MIN_VALUE;
-                if (!perfEventParanoidLines.isEmpty())
-                    perfEventParanoid = Integer.parseInt(perfEventParanoidLines.get(0));
-
-                List<String> kptrRestrictLines = FileUtils.readLines(new File("/proc/sys/kernel/kptr_restrict"));
-                int kptrRestrict = Integer.MIN_VALUE;
-                if (!kptrRestrictLines.isEmpty())
-                    kptrRestrict = Integer.parseInt(kptrRestrictLines.get(0));
+                int perfEventParanoid = readPerfEventParanoid();
+                int kptrRestrict = readKptrRestrict();
 
                 if (perfEventParanoid == Integer.MIN_VALUE || kptrRestrict == Integer.MIN_VALUE)
                 {

@@ -78,16 +78,23 @@ public class AsyncProfilerService implements AsyncProfilerMBean
     private final boolean unsafeMode;
     private static String logDir;
     private final AtomicReference<File> currentResultFile = new AtomicReference<>();
+    private final StartupChecks.AsyncProfilerKernelParamsCheck kernelParamsCheck;
 
     @VisibleForTesting
     public static synchronized AsyncProfilerService instance(String logDir, boolean registerMBean)
+    {
+        return instance(logDir, registerMBean, new StartupChecks.AsyncProfilerKernelParamsCheck());
+    }
+
+    @VisibleForTesting
+    public static synchronized AsyncProfilerService instance(String logDir, boolean registerMBean, StartupChecks.AsyncProfilerKernelParamsCheck kernelParamsCheck)
     {
         AsyncProfilerService.logDir = logDir;
         if (instance == null)
         {
             try
             {
-                instance = new AsyncProfilerService(ASYNC_PROFILER_UNSAFE_MODE.getBoolean());
+                instance = new AsyncProfilerService(ASYNC_PROFILER_UNSAFE_MODE.getBoolean(), kernelParamsCheck);
 
                 if (registerMBean)
                 {
@@ -126,7 +133,13 @@ public class AsyncProfilerService implements AsyncProfilerMBean
 
     public AsyncProfilerService(boolean unsafeMode)
     {
+        this(unsafeMode, null);
+    }
+
+    public AsyncProfilerService(boolean unsafeMode, StartupChecks.AsyncProfilerKernelParamsCheck kernelParamsCheck)
+    {
         this.unsafeMode = unsafeMode;
+        this.kernelParamsCheck = kernelParamsCheck;
     }
 
     public enum AsyncProfilerEvent
@@ -206,7 +219,7 @@ public class AsyncProfilerService implements AsyncProfilerMBean
                 public Object apply(AsyncProfiler profiler) throws Throwable
                 {
                     maybeCreateProfilesLogDir();
-                    new StartupChecks.AsyncProfilerKernelParamsCheck().execute(null, true);
+                    kernelParamsCheck.execute(null, true);
 
                     String parsedFormat = AsyncProfilerFormat.parseFormat(parameters.get(ASYNC_PROFILER_START_OUTPUT_FORMAT_PARAM));
                     String parsedEvents = AsyncProfilerEvent.parseEvents(parameters.get(ASYNC_PROFILER_START_EVENTS_PARAM));

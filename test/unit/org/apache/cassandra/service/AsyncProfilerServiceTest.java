@@ -56,6 +56,24 @@ public class AsyncProfilerServiceTest
     private AsyncProfilerService profiler;
     private File testOutputFile;
 
+    /**
+     * Test-friendly kernel params check that returns valid values without reading from /proc
+     */
+    private static class TestAsyncProfilerKernelParamsCheck extends StartupChecks.AsyncProfilerKernelParamsCheck
+    {
+        @Override
+        protected int readPerfEventParanoid()
+        {
+            return 1; // Valid value (must be <= 1)
+        }
+
+        @Override
+        protected int readKptrRestrict()
+        {
+            return 0; // Valid value (must be == 0)
+        }
+    }
+
     @BeforeClass
     public static void setUpClass()
     {
@@ -90,7 +108,7 @@ public class AsyncProfilerServiceTest
     private AsyncProfilerService getProfiler()
     {
         AsyncProfilerService.reset();
-        return AsyncProfilerService.instance(testOutputPath, false);
+        return AsyncProfilerService.instance(testOutputPath, false, new TestAsyncProfilerKernelParamsCheck());
     }
 
     @Test
