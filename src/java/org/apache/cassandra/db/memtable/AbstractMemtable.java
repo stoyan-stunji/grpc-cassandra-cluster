@@ -196,10 +196,9 @@ public abstract class AbstractMemtable implements Memtable
 
         public void update(RegularAndStaticColumns columns)
         {
-            for (ColumnMetadata s : columns.statics)
-                update(s);
-            for (ColumnMetadata r : columns.regulars)
-                update(r);
+            if (!columns.statics.isEmpty())
+                columns.statics.apply(ColumnsCollector::update, this);
+            columns.regulars.apply(ColumnsCollector::update, this);
         }
 
         public void update(ColumnsCollector other)
