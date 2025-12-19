@@ -34,6 +34,7 @@ import org.apache.cassandra.distributed.shared.WithProperties;
 import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.service.AsyncProfilerService;
+import org.apache.cassandra.service.StartupChecks;
 
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.apache.cassandra.config.CassandraRelevantProperties.ASYNC_PROFILER_ENABLED;
@@ -46,6 +47,24 @@ public class AsyncProfilerTest extends TestBaseImpl
     public TemporaryFolder tmpDir = new TemporaryFolder();
 
     private Cluster cluster;
+
+    /**
+     * Test-friendly kernel params check that returns valid values without reading from /proc
+     */
+    public static class TestAsyncProfilerKernelParamsCheck extends StartupChecks.AsyncProfilerKernelParamsCheck
+    {
+        @Override
+        protected int readPerfEventParanoid()
+        {
+            return 1; // Valid value (must be <= 1)
+        }
+
+        @Override
+        protected int readKptrRestrict()
+        {
+            return 0; // Valid value (must be == 0)
+        }
+    }
 
     @Test
     public void testNodetoolCommands() throws Throwable
@@ -108,7 +127,7 @@ public class AsyncProfilerTest extends TestBaseImpl
             // Initialize AsyncProfilerService instance in the cluster node context with the test directory
             String tmpDirPath = newTmpDir.absolutePath();
             cluster.get(1).runOnInstance(() -> {
-                AsyncProfilerService.instance(tmpDirPath, true);
+                AsyncProfilerService.instance(tmpDirPath, true, new TestAsyncProfilerKernelParamsCheck());
             });
 
             // fetch
