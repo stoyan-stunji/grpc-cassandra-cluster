@@ -147,12 +147,12 @@ public class CQL3CasRequest implements CASRequest
     }
 
 
-    void addWriteFragment(ModificationStatement stmt, QueryOptions options, ClientState clientState)
+    void addWriteFragment(ModificationStatement stmt, QueryOptions options, ClientState clientState, long nowInSeconds)
     {
         // Create TxnWrite.Fragment directly using existing pattern
         PartitionKey partitionKey = new PartitionKey(metadata.id, key);
         TxnWrite.Fragment fragment = stmt.forTxn().getTxnWriteFragment(
-            writeFragments.size(), clientState, options, partitionKey);
+            writeFragments.size(), clientState, options, partitionKey, nowInSeconds);
         writeFragments.add(fragment);
     }
 

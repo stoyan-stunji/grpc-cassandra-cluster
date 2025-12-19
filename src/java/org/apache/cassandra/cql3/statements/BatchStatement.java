@@ -611,7 +611,7 @@ public class BatchStatement implements CQLStatement.CompositeCQLStatement
 
                 try
                 {
-                    casRequest.addWriteFragment(statement, statementOptions, state.getClientState());
+                    casRequest.addWriteFragment(statement, statementOptions, state.getClientState(), nowInSeconds);
                 }
                 catch (GuardrailViolatedException e)
                 {
@@ -638,7 +638,7 @@ public class BatchStatement implements CQLStatement.CompositeCQLStatement
 
                 try
                 {
-                    casRequest.addWriteFragment(statement, statementOptions, state.getClientState());
+                    casRequest.addWriteFragment(statement, statementOptions, state.getClientState(), nowInSeconds);
                 }
                 catch (GuardrailViolatedException e)
                 {
@@ -691,6 +691,17 @@ public class BatchStatement implements CQLStatement.CompositeCQLStatement
 
         try (RowIterator result = ModificationStatement.casInternal(state.getClientState(), request, timestamp, nowInSeconds))
         {
+            // Commit or discard deferred warnings based on whether conditions passed
+            if (result == null)
+                ClientWarn.instance.commitDeferredWarnings();
+            else
+                ClientWarn.instance.discardDeferredWarnings();
+
+            // Check for deferred guardrail exception - if conditions passed (result is null)
+            // and we have a stored exception, throw it now (AFTER committing warnings)
+            if (result == null && request.getStoredGuardrailException() != null)
+                throw GuardrailViolatedException.wrapForDeferredThrow(request.getStoredGuardrailException());
+
             ResultSet resultSet =
                 ModificationStatement.buildCasResultSet(ksName,
                                                         tableName,

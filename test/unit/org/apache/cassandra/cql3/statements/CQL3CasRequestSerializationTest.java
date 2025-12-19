@@ -35,6 +35,7 @@ import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.service.ClientState;
+import org.apache.cassandra.utils.FBUtilities;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
@@ -264,7 +265,7 @@ public class CQL3CasRequestSerializationTest extends CQLTester
 
         // Add write fragment to the request
         QueryOptions options = QueryOptions.DEFAULT;
-        original.addWriteFragment(stmt, options, clientState);
+        original.addWriteFragment(stmt, options, clientState, FBUtilities.nowInSeconds());
 
         CQL3CasRequest deserialized = serdes(original);
 
@@ -292,8 +293,8 @@ public class CQL3CasRequestSerializationTest extends CQLTester
 
         // Add multiple write fragments to the request
         QueryOptions options = QueryOptions.DEFAULT;
-        original.addWriteFragment(stmt1, options, clientState);
-        original.addWriteFragment(stmt2, options, clientState);
+        original.addWriteFragment(stmt1, options, clientState, FBUtilities.nowInSeconds());
+        original.addWriteFragment(stmt2, options, clientState, FBUtilities.nowInSeconds());
 
         CQL3CasRequest deserialized = serdes(original);
 
@@ -351,7 +352,7 @@ public class CQL3CasRequestSerializationTest extends CQLTester
         ModificationStatement stmt = (ModificationStatement) QueryProcessor.parseStatement(insertCql, clientState);
 
         QueryOptions options = QueryOptions.DEFAULT;
-        original.addWriteFragment(stmt, options, clientState);
+        original.addWriteFragment(stmt, options, clientState, FBUtilities.nowInSeconds());
 
         CQL3CasRequest deserialized = serdes(original);
 
@@ -388,7 +389,7 @@ public class CQL3CasRequestSerializationTest extends CQLTester
         original.addExist(clustering);
 
         // Add write fragment - this should create non-empty TxnReferenceOperations
-        original.addWriteFragment(stmt, options, clientState);
+        original.addWriteFragment(stmt, options, clientState, FBUtilities.nowInSeconds());
 
         CQL3CasRequest deserialized = serdes(original);
 
@@ -426,7 +427,7 @@ public class CQL3CasRequestSerializationTest extends CQLTester
         original.addExist(clustering);
 
         // Add write fragment - this should create non-empty TxnReferenceOperations.statics
-        original.addWriteFragment(stmt, options, clientState);
+        original.addWriteFragment(stmt, options, clientState, FBUtilities.nowInSeconds());
 
         CQL3CasRequest deserialized = serdes(original);
 
@@ -463,7 +464,7 @@ public class CQL3CasRequestSerializationTest extends CQLTester
         original.addExist(clustering);
 
         // Add write fragment - this should create non-empty TxnReferenceOperations with numeric increment operations
-        original.addWriteFragment(stmt, options, clientState);
+        original.addWriteFragment(stmt, options, clientState, FBUtilities.nowInSeconds());
 
         CQL3CasRequest deserialized = serdes(original);
 
@@ -510,9 +511,9 @@ public class CQL3CasRequestSerializationTest extends CQLTester
         QueryOptions options = QueryOptions.DEFAULT;
 
         // Add write fragments - this should create TxnReferenceOperations with both regular and static operations
-        original.addWriteFragment(listStmt, options, clientState);
-        original.addWriteFragment(mapStmt, options, clientState);
-        original.addWriteFragment(staticListStmt, options, clientState);
+        original.addWriteFragment(listStmt, options, clientState, FBUtilities.nowInSeconds());
+        original.addWriteFragment(mapStmt, options, clientState, FBUtilities.nowInSeconds());
+        original.addWriteFragment(staticListStmt, options, clientState, FBUtilities.nowInSeconds());
 
         CQL3CasRequest deserialized = serdes(original);
 

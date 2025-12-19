@@ -721,7 +721,7 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
         ClientWarn.instance.startDeferring();
         try
         {
-            request.addWriteFragment(this, options, clientState);
+            request.addWriteFragment(this, options, clientState, nowInSeconds);
         }
         catch (GuardrailViolatedException e)
         {
@@ -874,6 +874,17 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
 
         try (RowIterator result = casInternal(state.getClientState(), request, options.getTimestamp(state), options.getNowInSeconds(state)))
         {
+            // Commit or discard deferred warnings based on whether conditions passed
+            if (result == null)
+                ClientWarn.instance.commitDeferredWarnings();
+            else
+                ClientWarn.instance.discardDeferredWarnings();
+
+            // Check for deferred guardrail exception - if conditions passed (result is null)
+            // and we have a stored exception, throw it now (AFTER committing warnings)
+            if (result == null && request.getStoredGuardrailException() != null)
+                throw GuardrailViolatedException.wrapForDeferredThrow(request.getStoredGuardrailException());
+
             return new ResultMessage.Rows(buildCasResultSet(result, state, options));
         }
     }
@@ -942,9 +953,9 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
         }
     }
 
-    public PartitionUpdate getTxnUpdate(ClientState state, QueryOptions options)
+    public PartitionUpdate getTxnUpdate(ClientState state, QueryOptions options, long nowInSeconds)
     {
-        List<? extends IMutation> mutations = getMutations(state, options, false, 0, 0, new Dispatcher.RequestTime(0, 0));
+        List<? extends IMutation> mutations = getMutations(state, options, false, 0, nowInSeconds, new Dispatcher.RequestTime(0, 0));
         // TODO: Temporary fix for CASSANDRA-20079
         if (mutations.isEmpty())
             return PartitionUpdate.emptyUpdate(metadata, metadata.partitioner.decorateKey(ByteBufferUtil.EMPTY_BYTE_BUFFER));
@@ -996,16 +1007,16 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
         return operations.allSubstitutions();
     }
 
-    public TxnWrite.Fragment getTxnWriteFragment(int index, ClientState state, QueryOptions options, PartitionKey partitionKey)
+    public TxnWrite.Fragment getTxnWriteFragment(int index, ClientState state, QueryOptions options, PartitionKey partitionKey, long nowInSeconds)
     {
-        PartitionUpdate baseUpdate = getTxnUpdate(state, options);
+        PartitionUpdate baseUpdate = getTxnUpdate(state, options, nowInSeconds);
         TxnReferenceOperations referenceOps = getTxnReferenceOps(options, state);
         return new TxnWrite.Fragment(partitionKey, index, baseUpdate, referenceOps);
     }
 
-    public TxnWrite.Fragment getTxnWriteFragment(int index, ClientState state, QueryOptions options, KeyCollector keyCollector)
+    public TxnWrite.Fragment getTxnWriteFragment(int index, ClientState state, QueryOptions options, KeyCollector keyCollector, long nowInSeconds)
     {
-        PartitionUpdate baseUpdate = getTxnUpdate(state, options);
+        PartitionUpdate baseUpdate = getTxnUpdate(state, options, nowInSeconds);
         TxnReferenceOperations referenceOps = getTxnReferenceOps(options, state);
         return new TxnWrite.Fragment(keyCollector.collect(baseUpdate.metadata(), baseUpdate.partitionKey()), index, baseUpdate, referenceOps);
     }

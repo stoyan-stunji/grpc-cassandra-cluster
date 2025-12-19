@@ -24,6 +24,7 @@ import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -52,7 +53,9 @@ import org.apache.cassandra.cql3.UpdateParameters;
 import org.apache.cassandra.db.Clustering;
 import org.apache.cassandra.db.Columns;
 import org.apache.cassandra.db.DecoratedKey;
+import org.apache.cassandra.db.DeletionTime;
 import org.apache.cassandra.db.Mutation;
+import org.apache.cassandra.db.RangeTombstone;
 import org.apache.cassandra.db.ReadCommand.PotentialTxnConflicts;
 import org.apache.cassandra.db.RegularAndStaticColumns;
 import org.apache.cassandra.db.TypeSizes;
@@ -329,6 +332,16 @@ public class TxnWrite extends AbstractKeySorted<TxnWrite.Update> implements Writ
 
                 for (Row row : baseUpdate)
                     updateBuilder.add(row);
+
+                // Copy deletion info (partition deletion and range tombstones)
+                // Timestamps will be updated later in Proposal.of() via updateAllTimestamp()
+                DeletionTime partitionDeletion = baseUpdate.deletionInfo().getPartitionDeletion();
+                if (!partitionDeletion.isLive())
+                    updateBuilder.addPartitionDeletion(partitionDeletion);
+
+                Iterator<RangeTombstone> rangeIterator = baseUpdate.deletionInfo().rangeIterator(false);
+                while (rangeIterator.hasNext())
+                    updateBuilder.add(rangeIterator.next());
 
                 return;
             }
