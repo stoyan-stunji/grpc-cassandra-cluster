@@ -61,7 +61,6 @@ import com.google.common.collect.Sets;
 import com.google.common.primitives.Ints;
 import com.google.common.primitives.Longs;
 import com.google.common.util.concurrent.RateLimiter;
-
 import org.apache.commons.lang3.ArrayUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
@@ -216,6 +215,8 @@ public class DatabaseDescriptor
     private static DiskAccessMode indexAccessMode;
 
     private static DiskAccessMode commitLogWriteDiskAccessMode;
+
+    private static DiskAccessMode compactionScanDiskAccessMode;
 
     private static AbstractCryptoProvider cryptoProvider;
     private static IAuthenticator authenticator;
@@ -657,6 +658,9 @@ public class DatabaseDescriptor
             indexAccessMode = conf.disk_access_mode;
         }
         logger.info("DiskAccessMode is {}, indexAccessMode is {}", conf.disk_access_mode, indexAccessMode);
+
+        initializeCompactionScanDiskAccessMode();
+        logger.info("compaction_scan_disk_access_mode resolved to: {}", compactionScanDiskAccessMode);
 
         /* phi convict threshold for FailureDetector */
         if (conf.phi_convict_threshold < 5 || conf.phi_convict_threshold > 16)
@@ -1740,6 +1744,31 @@ public class DatabaseDescriptor
         }
 
         partitionerName = partitioner.getClass().getCanonicalName();
+    }
+
+    private static DiskAccessMode resolveCompactionScanDiskAccessMode(DiskAccessMode defaultDiskAccessMode,
+                                                                      DiskAccessMode compactionScanDiskAccessMode)
+    {
+        if (DiskAccessMode.auto == compactionScanDiskAccessMode)
+        {
+            return defaultDiskAccessMode;
+        }
+        else if (DiskAccessMode.direct == compactionScanDiskAccessMode)
+        {
+            if (conf.disk_optimization_strategy == Config.DiskOptimizationStrategy.ssd)
+            {
+                return DiskAccessMode.direct;
+            }
+
+            logger.warn("Compaction scan disk access mode {} not supported on disk optimization strategy {}",
+                        DiskAccessMode.direct, conf.disk_optimization_strategy);
+            return defaultDiskAccessMode;
+        }
+        else
+        {
+            throw new IllegalArgumentException("Unsupported disk access mode for compaction_scan_disk_access_mode " +
+                                               "(options: direct/auto) " + compactionScanDiskAccessMode);
+        }
     }
 
     private static Pair<DiskAccessMode, Boolean> resolveCommitLogWriteDiskAccessMode(DiskAccessMode providedDiskAccessMode)
@@ -3286,6 +3315,18 @@ public class DatabaseDescriptor
         conf.commitlog_segment_size = new DataStorageSpec.IntMebibytesBound(sizeMebibytes);
     }
 
+    public static DiskAccessMode getCompactionScanDiskAccessMode()
+    {
+        return compactionScanDiskAccessMode;
+    }
+
+    @VisibleForTesting
+    public static void setCompactionScanDiskAccessMode(DiskAccessMode scanDiskAccessMode)
+    {
+        compactionScanDiskAccessMode = scanDiskAccessMode;
+        conf.compaction_scan_disk_access_mode = scanDiskAccessMode;
+    }
+
     /**
      * Return commitlog disk access mode.
      */
@@ -3307,6 +3348,11 @@ public class DatabaseDescriptor
         Pair<DiskAccessMode, Boolean> accessModeDirectIoPair = resolveCommitLogWriteDiskAccessMode(conf.commitlog_disk_access_mode);
         validateCommitLogWriteDiskAccessMode(accessModeDirectIoPair);
         commitLogWriteDiskAccessMode = accessModeDirectIoPair.left;
+    }
+
+    public static void initializeCompactionScanDiskAccessMode()
+    {
+        compactionScanDiskAccessMode = resolveCompactionScanDiskAccessMode(conf.disk_access_mode, conf.compaction_scan_disk_access_mode);
     }
 
     public static String getSavedCachesLocation()

@@ -319,6 +319,34 @@ public class RandomAccessReader extends RebufferingInputStream implements FileDa
         }
     }
 
+    static class RandomAccessReaderWithOwnFile extends RandomAccessReader
+    {
+
+        private final FileHandle fileHandle;
+
+        RandomAccessReaderWithOwnFile(Rebufferer rebufferer, FileHandle fileHandle)
+        {
+            super(rebufferer);
+            this.fileHandle = fileHandle;
+        }
+
+        @Override
+        public void close()
+        {
+            try
+            {
+                super.close();
+            }
+            finally
+            {
+                if (this.fileHandle != null)
+                {
+                    fileHandle.close();
+                }
+            }
+        }
+    }
+
     /**
      * Open a RandomAccessReader (not compressed, not mmapped, no read throttling) that will own its channel.
      *

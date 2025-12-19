@@ -356,7 +356,7 @@ public abstract class SortedTableWriter<P extends SortedTablePartitionWriter, I 
         FileHandle dataFile;
         try (CompressionMetadata compressionMetadata = compression ? ((CompressedSequentialWriter) dataWriter).open(lengthOverride) : null)
         {
-            dataFile = dataFileBuilder.mmapped(ioOptions.defaultDiskAccessMode)
+            dataFile = dataFileBuilder.withDiskAccessMode(ioOptions.defaultDiskAccessMode)
                                       .withMmappedRegionsCache(mmappedRegionsCache)
                                       .withChunkCache(chunkCache)
                                       .withCompressionMetadata(compressionMetadata)

@@ -114,6 +114,8 @@ import org.apache.cassandra.utils.concurrent.SharedCloseable;
 import org.apache.cassandra.utils.concurrent.UncheckedInterruptedException;
 
 import static org.apache.cassandra.concurrent.ExecutorFactory.Global.executorFactory;
+import static org.apache.cassandra.config.Config.DiskAccessMode;
+import static org.apache.cassandra.io.util.FileHandle.OnReaderClose;
 import static org.apache.cassandra.utils.TimeUUID.unixMicrosToRawTimestamp;
 import static org.apache.cassandra.utils.concurrent.BlockingQueues.newBlockingQueue;
 import static org.apache.cassandra.utils.concurrent.SharedCloseable.sharedCopyOrNull;
@@ -269,6 +271,7 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
     public final OpenReason openReason;
 
     protected final FileHandle dfile;
+    protected final boolean directIOSupported;
 
     // technically isCompacted is not necessary since it should never be unreferenced unless it is also compacted,
     // but it seems like a good extra layer of protection against reference counting bugs to not delete data based on that alone
@@ -364,7 +367,7 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
 
     public static SSTableReader open(SSTable.Owner owner, Descriptor desc, TableMetadataRef metadata)
     {
-        return open(owner, desc,  null, metadata);
+        return open(owner, desc, null, metadata);
     }
 
     public static SSTableReader open(SSTable.Owner owner, Descriptor descriptor, Set<Component> components, TableMetadataRef metadata)
@@ -472,6 +475,9 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
         this.sstableMetadata = builder.getStatsMetadata();
         this.header = builder.getSerializationHeader();
         this.dfile = builder.getDataFile();
+        this.directIOSupported = FileUtils.isDirectIOSupported(dfile.file())
+                                 // DIO currently only supported for compressed reads
+                                 && dfile.compressionMetadata().isPresent();
         this.maxDataAge = builder.getMaxDataAge();
         this.openReason = builder.getOpenReason();
         this.first = builder.getFirst();
@@ -1065,11 +1071,16 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
      */
     public ISSTableScanner getScanner()
     {
+        return getScanner(dfile.diskAccessMode());
+    }
+
+    public ISSTableScanner getScanner(DiskAccessMode diskAccessMode)
+    {
         PartitionPositionBounds fullRange = getPositionsForFullRange();
         if (fullRange != null)
-            return new SSTableSimpleScanner(this, Collections.singletonList(fullRange));
+            return new SSTableSimpleScanner(this, Collections.singletonList(fullRange), diskAccessMode);
         else
-            return new SSTableSimpleScanner(this, Collections.emptyList());
+            return new SSTableSimpleScanner(this, Collections.emptyList(), diskAccessMode);
     }
 
     /**
@@ -1080,10 +1091,15 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
      */
     public ISSTableScanner getScanner(Collection<Range<Token>> ranges)
     {
+        return getScanner(ranges, dfile.diskAccessMode());
+    }
+
+    public ISSTableScanner getScanner(Collection<Range<Token>> ranges, DiskAccessMode diskAccessMode)
+    {
         if (ranges != null)
-            return new SSTableSimpleScanner(this, getPositionsForRanges(ranges));
+            return new SSTableSimpleScanner(this, getPositionsForRanges(ranges), diskAccessMode);
         else
-            return getScanner();
+            return getScanner(diskAccessMode);
     }
 
     /**
@@ -1094,13 +1110,13 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
      */
     public ISSTableScanner getScanner(Iterator<AbstractBounds<PartitionPosition>> boundsIterator)
     {
-        return new SSTableSimpleScanner(this, getPositionsForBoundsIterator(boundsIterator));
+        return new SSTableSimpleScanner(this, getPositionsForBoundsIterator(boundsIterator), dfile.diskAccessMode());
     }
 
     public ISSTableScanner getScanner(AbstractBounds<PartitionPosition> bounds)
     {
         PartitionPositionBounds positionBounds = getPositionsForBounds(bounds);
-        return new SSTableSimpleScanner(this, positionBounds == null ? Collections.emptyList() : Collections.singletonList(positionBounds));
+        return new SSTableSimpleScanner(this, positionBounds == null ? Collections.emptyList() : Collections.singletonList(positionBounds), dfile.diskAccessMode());
     }
 
 
@@ -1408,7 +1424,27 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
 
     public RandomAccessReader openDataReaderForScan()
     {
-        return dfile.createReaderForScan();
+        return openDataReaderForScan(dfile.diskAccessMode());
+    }
+
+    public RandomAccessReader openDataReaderForScan(DiskAccessMode diskAccessMode)
+    {
+        if (diskAccessMode == dfile.diskAccessMode())
+        {
+            return dfile.createReaderForScan(OnReaderClose.RETAIN_FILE_OPEN);
+        }
+
+        if (diskAccessMode == DiskAccessMode.direct && !directIOSupported)
+        {
+            return dfile.createReaderForScan(OnReaderClose.RETAIN_FILE_OPEN);
+        }
+
+        //noinspection resource - The FileHandle lifecycle is managed by the returned RandomAccessReader
+        FileHandle dataFile = dfile.toBuilder()
+                                   .withDiskAccessMode(diskAccessMode)
+                                   .complete();
+
+        return dataFile.createReaderForScan(OnReaderClose.CLOSE_FILE);
     }
 
     public void trySkipFileCacheBefore(DecoratedKey key)
