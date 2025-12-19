@@ -26,16 +26,25 @@ import static org.junit.Assert.*;
 
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.cql3.statements.CQL3CasRequest;
 import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.db.DecoratedKey;
+import org.apache.cassandra.db.RegularAndStaticColumns;
+import org.apache.cassandra.db.SinglePartitionReadCommand;
+import org.apache.cassandra.db.filter.ClusteringIndexSliceFilter;
+import org.apache.cassandra.db.filter.ColumnFilter;
+import org.apache.cassandra.db.filter.RowFilter;
 import org.apache.cassandra.db.rows.RowIterator;
 import org.apache.cassandra.exceptions.UnavailableException;
 import org.apache.cassandra.io.util.DataInputBuffer;
 import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.schema.KeyspaceParams;
+import org.apache.cassandra.schema.Schema;
+import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.service.RemoteClientState;
 import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.cassandra.utils.FBUtilities;
 
 public class CasForwardingTest
 {
@@ -80,17 +89,19 @@ public class CasForwardingTest
     public void testCasForwardRequestWithRemoteClientState() throws Exception
     {
         // Test CasForwardRequest with RemoteClientState serialization
-        // Note: This test only verifies the CasForwardRequest can be constructed with RemoteClientState.
-        // Serialization roundtrip requires a real CQL3CasRequest which is complex to construct.
+        TableMetadata metadata = Schema.instance.getTableMetadata(KEYSPACE1, CF_STANDARD1);
         DecoratedKey key = DatabaseDescriptor.getPartitioner().decorateKey(ByteBufferUtil.bytes("test"));
         ClientState localState = ClientState.forInternalCalls();
         localState.setKeyspace(KEYSPACE1);
+
+        // Create a real CQL3CasRequest
+        CQL3CasRequest casRequest = new CQL3CasRequest(metadata, key, RegularAndStaticColumns.NONE, true, false);
 
         CasForwardRequest request = new CasForwardRequest(
             KEYSPACE1,
             CF_STANDARD1,
             key,
-            null, // CASRequest - simplified for test
+            casRequest,
             ConsistencyLevel.QUORUM,
             ConsistencyLevel.QUORUM,
             localState,
@@ -107,11 +118,8 @@ public class CasForwardingTest
         assertEquals("CF name should match", CF_STANDARD1, request.cfName);
         assertEquals("Consistency for paxos should match", ConsistencyLevel.QUORUM, request.consistencyForPaxos);
         assertEquals("Consistency for commit should match", ConsistencyLevel.QUORUM, request.consistencyForCommit);
+        assertNotNull("CAS request should not be null", request.casRequest);
     }
-
-    // Note: Full serialization testing for CasForwardRequest requires a real CQL3CasRequest,
-    // which is complex to construct in unit tests. The serialization infrastructure is tested
-    // through integration tests. This test verifies the non-serialization aspects of the request.
 
     @Test
     public void testCasForwardResponseSerialization() throws Exception
@@ -184,14 +192,27 @@ public class CasForwardingTest
     public void testConsensusReadForwardRequestCreation() throws Exception
     {
         // Test basic creation of ConsensusReadForwardRequest
-        // ConsensusReadForwardRequest now takes a single command, so we just test with null for simplicity
+        TableMetadata metadata = Schema.instance.getTableMetadata(KEYSPACE1, CF_STANDARD1);
+        DecoratedKey key = DatabaseDescriptor.getPartitioner().decorateKey(ByteBufferUtil.bytes("test"));
+
+        // Create a real SinglePartitionReadCommand
+        SinglePartitionReadCommand command = SinglePartitionReadCommand.create(
+            metadata,
+            FBUtilities.nowInSeconds(),
+            ColumnFilter.all(metadata),
+            RowFilter.none(),
+            org.apache.cassandra.db.filter.DataLimits.NONE,
+            key,
+            new ClusteringIndexSliceFilter(org.apache.cassandra.db.Slices.ALL, false)
+        );
+
         ConsensusReadForwardRequest request = new ConsensusReadForwardRequest(
-            null,
+            command,
             ConsistencyLevel.QUORUM
         );
 
         assertNotNull("ConsensusReadForwardRequest should be created", request);
-        assertNull("Command should be null for this test", request.command);
+        assertNotNull("Command should not be null", request.command);
         assertEquals("Consistency level should match", ConsistencyLevel.QUORUM, request.consistencyLevel);
     }
 
