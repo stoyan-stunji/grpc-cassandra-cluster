@@ -335,6 +335,12 @@ public class ShardedSkipListMemtable extends AbstractShardedMemtable
             {
                 return tableMetadata;
             }
+
+            @Override
+            public boolean columnsChangedAfterCreation()
+            {
+                return !ShardedSkipListMemtable.this.columnsOnCreation.equals(tableMetadata.regularAndStaticColumns());
+            }
         };
     }
 

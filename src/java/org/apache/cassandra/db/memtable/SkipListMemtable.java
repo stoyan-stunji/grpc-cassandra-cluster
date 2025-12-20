@@ -333,6 +333,12 @@ public class SkipListMemtable extends AbstractAllocatorMemtable
             {
                 return tableMetadata;
             }
+
+            @Override
+            public boolean columnsChangedAfterCreation()
+            {
+                return !SkipListMemtable.this.columnsOnCreation.equals(tableMetadata.regularAndStaticColumns());
+            }
         };
     }
 
