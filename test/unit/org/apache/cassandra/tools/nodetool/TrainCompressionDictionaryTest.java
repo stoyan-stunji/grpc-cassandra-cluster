@@ -70,7 +70,7 @@ public class TrainCompressionDictionaryTest extends CQLTester
         ToolRunner.ToolResult result = invokeNodetool("compressiondictionary", "train", keyspace(), table);
         result.asserts().failure();
         assertThat(result.getStderr())
-        .as("Should indicate training completed not completed")
+        .as("Should indicate training not completed")
         .contains("Trainer is not ready: insufficient sample size")
         .contains("/8 MiB") // 10MiB / 10 * 8
         .contains(keyspace())
@@ -82,7 +82,7 @@ public class TrainCompressionDictionaryTest extends CQLTester
                                                                    keyspace(), table);
 
         assertThat(resultWithOverrides.getStderr())
-        .as("Should indicate training completed not completed")
+        .as("Should indicate training not completed")
         .contains("Trainer is not ready: insufficient sample size")
         .contains("/4 MiB") // 5MiB / 10 * 8
         .contains(keyspace())
@@ -99,7 +99,7 @@ public class TrainCompressionDictionaryTest extends CQLTester
         ToolRunner.ToolResult resultWithoutOverrides = invokeNodetool("compressiondictionary", "train", keyspace(), table);
 
         assertThat(resultWithoutOverrides.getStderr())
-        .as("Should indicate training completed not completed")
+        .as("Should indicate training not completed")
         .contains("Trainer is not ready: insufficient sample size")
         .contains("/4.8 MiB") // 6MiB / 10 * 8
         .contains(keyspace())

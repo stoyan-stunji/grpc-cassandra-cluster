@@ -416,10 +416,10 @@ public class CompressionDictionaryManager implements CompressionDictionaryManage
         String resolvedValue = null;
         try
         {
-            if (userSuppliedValue != null)
-                resolvedValue = userSuppliedValue;
-            else
+            if (userSuppliedValue == null)
                 resolvedValue = compressionParams.getOtherOptions().getOrDefault(parameterName, defaultParameterValue);
+            else
+                resolvedValue = userSuppliedValue;
 
             return new DataStorageSpec.IntKibibytesBound(resolvedValue).toBytes();
         }

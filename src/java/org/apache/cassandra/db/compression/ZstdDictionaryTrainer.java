@@ -50,7 +50,7 @@ public class ZstdDictionaryTrainer implements ICompressionDictionaryTrainer
 
     private final String keyspaceName;
     private final String tableName;
-    private CompressionDictionaryTrainingConfig config;
+    private volatile CompressionDictionaryTrainingConfig config;
     private final AtomicLong totalSampleSize;
     private final AtomicLong sampleCount;
     private final int compressionLevel; // optimal if using the same level for training as when compressing.

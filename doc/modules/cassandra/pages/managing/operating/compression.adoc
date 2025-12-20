@@ -148,12 +148,12 @@ Enable automatic training in `cassandra.yaml`:
 [source,yaml]
 ----
 compression_dictionary_training_auto_train_enabled: true
-compression_dictionary_training_sampling_rate: 100  # 1% of writes
+compression_dictionary_training_sampling_rate: 0.01  # 1% of writes
 ----
 
 When enabled, Cassandra automatically samples write operations and
 trains dictionaries in the background based on the configured sampling
-rate (range: 1-10000, where 100 = 1% of writes).
+rate (range: 0.01-1, where 0.01 = 1% of writes).
 
 === Dictionary Storage and Distribution
 
@@ -301,8 +301,8 @@ next access.
 * `compression_dictionary_training_auto_train_enabled` (default: `false`):
 Enable automatic background dictionary training. When enabled, Cassandra
 samples writes and trains dictionaries automatically.
-* `compression_dictionary_training_sampling_rate` (default: `100`):
-Sampling rate for automatic training, range 1-10000 where 100 = 1% of
+* `compression_dictionary_training_sampling_rate` (default: `0.01`):
+Sampling rate for automatic training, range 0.01-1 where 0.01 = 1% of
 writes. Lower values reduce training overhead but may miss data patterns.
 
 Example configuration:
@@ -317,7 +317,7 @@ compression_dictionary_cache_expire: 3600
 
 # Automatic training
 compression_dictionary_training_auto_train_enabled: false
-compression_dictionary_training_sampling_rate: 100
+compression_dictionary_training_sampling_rate: 0.01
 ----
 
 === CQL training parameters:
