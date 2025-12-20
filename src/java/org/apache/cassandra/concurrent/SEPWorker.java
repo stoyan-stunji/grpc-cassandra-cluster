@@ -130,7 +130,7 @@ final class SEPWorker extends AtomicReference<SEPWorker.Work> implements Runnabl
                 assigned = get().assigned;
                 if (assigned == null)
                     continue;
-                if (SET_THREAD_NAME && assigned.name != lastUsedExecutorName) // equals is not used intentionally
+                if (SET_THREAD_NAME && assigned.name != lastUsedExecutorName) // .equals is not used intentionally
                 {
                     Thread.currentThread().setName(assigned.name + workerIdThreadSuffix);
                     lastUsedExecutorName = assigned.name;
