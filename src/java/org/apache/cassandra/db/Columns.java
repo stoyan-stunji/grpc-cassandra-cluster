@@ -20,7 +20,6 @@ package org.apache.cassandra.db;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.*;
-import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
 
@@ -425,11 +424,6 @@ public class Columns extends AbstractCollection<ColumnMetadata> implements Colle
     public void apply(Consumer<ColumnMetadata> function)
     {
         BTree.apply(columns, function);
-    }
-
-    public <V> void apply(BiConsumer<V, ColumnMetadata> function, V argument)
-    {
-        BTree.apply(columns, function, argument);
     }
 
     @Override
