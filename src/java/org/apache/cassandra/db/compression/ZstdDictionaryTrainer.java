@@ -56,7 +56,7 @@ public class ZstdDictionaryTrainer implements ICompressionDictionaryTrainer
     private final int compressionLevel; // optimal if using the same level for training as when compressing.
 
     // Sampling rate can be updated during training
-    private volatile int samplingRate;
+    private volatile float samplingRate;
 
     // Minimum number of samples required by ZSTD library
     private static final int MIN_SAMPLES_REQUIRED = 11;
@@ -73,11 +73,11 @@ public class ZstdDictionaryTrainer implements ICompressionDictionaryTrainer
         this(keyspaceName,
              tableName,
              compressionLevel,
-             Math.round(1 / DatabaseDescriptor.getCompressionDictionaryTrainingSamplingRate()));
+             DatabaseDescriptor.getCompressionDictionaryTrainingSamplingRate());
     }
 
     @VisibleForTesting
-    public ZstdDictionaryTrainer(String keyspaceName, String tableName, int compressionLevel, int samplingRate)
+    public ZstdDictionaryTrainer(String keyspaceName, String tableName, int compressionLevel, float samplingRate)
     {
         this.keyspaceName = keyspaceName;
         this.tableName = tableName;
@@ -91,7 +91,7 @@ public class ZstdDictionaryTrainer implements ICompressionDictionaryTrainer
     @Override
     public boolean shouldSample()
     {
-        return zstdTrainer != null && ThreadLocalRandom.current().nextInt(samplingRate) == 0;
+        return zstdTrainer != null && ThreadLocalRandom.current().nextFloat() < samplingRate;
     }
 
     @Override
@@ -360,12 +360,11 @@ public class ZstdDictionaryTrainer implements ICompressionDictionaryTrainer
     }
 
     @Override
-    public void updateSamplingRate(int newSamplingRate)
+    public void updateSamplingRate(float newSamplingRate)
     {
-        if (newSamplingRate <= 0)
-        {
-            throw new IllegalArgumentException("Sampling rate must be positive, got: " + newSamplingRate);
-        }
+        if (newSamplingRate <= 0.0f || newSamplingRate > 1.0f)
+            throw new IllegalArgumentException("Sampling rate has to be between (0.0;1], it is " + newSamplingRate);
+
         this.samplingRate = newSamplingRate;
         logger.debug("Updated sampling rate to {} for {}.{}", newSamplingRate, keyspaceName, tableName);
     }

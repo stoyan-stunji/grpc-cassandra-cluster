@@ -530,7 +530,7 @@ public class ZstdDictionaryTrainerTest
         trainer.start(true, testConfig);
 
         // Test updating to different valid sampling rates
-        trainer.updateSamplingRate(10);
+        trainer.updateSamplingRate(0.1f);
 
         // With sampling rate 10 (10%), should mostly return false
         int sampleCount = 0;
@@ -550,7 +550,7 @@ public class ZstdDictionaryTrainerTest
         .isLessThan(iterations / 5);    // at most 20%
 
         // Test updating to 100% sampling
-        trainer.updateSamplingRate(1);
+        trainer.updateSamplingRate(1.0f);
 
         // Should always sample now
         for (int i = 0; i < 10; i++)
@@ -567,24 +567,24 @@ public class ZstdDictionaryTrainerTest
         trainer.start(true, testConfig);
 
         // Test invalid sampling rates
-        assertThatThrownBy(() -> trainer.updateSamplingRate(0))
+        assertThatThrownBy(() -> trainer.updateSamplingRate(0f))
         .isInstanceOf(IllegalArgumentException.class)
-        .hasMessageContaining("Sampling rate must be positive");
+        .hasMessageContaining("Sampling rate has to be between (0.0;1], it is 0.0");
 
-        assertThatThrownBy(() -> trainer.updateSamplingRate(-1))
+        assertThatThrownBy(() -> trainer.updateSamplingRate(-1f))
         .isInstanceOf(IllegalArgumentException.class)
-        .hasMessageContaining("Sampling rate must be positive");
+        .hasMessageContaining("Sampling rate has to be between (0.0;1], it is -1.0");
 
-        assertThatThrownBy(() -> trainer.updateSamplingRate(-100))
+        assertThatThrownBy(() -> trainer.updateSamplingRate(-100f))
         .isInstanceOf(IllegalArgumentException.class)
-        .hasMessageContaining("Sampling rate must be positive");
+        .hasMessageContaining("Sampling rate has to be between (0.0;1], it is -100.0");
     }
 
     @Test
     public void testUpdateSamplingRateBeforeStart()
     {
         // Should be able to update sampling rate even before start
-        trainer.updateSamplingRate(5);
+        trainer.updateSamplingRate(0.2f);
 
         trainer.start(true, testConfig);
 

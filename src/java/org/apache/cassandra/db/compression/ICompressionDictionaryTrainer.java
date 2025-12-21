@@ -125,10 +125,10 @@ public interface ICompressionDictionaryTrainer extends AutoCloseable
     /**
      * Updates the sampling rate for this trainer.
      *
-     * @param newSamplingRate the new sampling rate. For exmaple, 1 = sample every time (100%),
-     *                        2 = expect sample 1/2 of data (50%), n = expect sample 1/n of data
+     * @param newSamplingRate the new sampling rate. For exmaple, 0.01 - sample 1% of data,
+     *                        1 = sample every time (100%), 0.5 - sample 50% of data.
      */
-    void updateSamplingRate(int newSamplingRate);
+    void updateSamplingRate(float newSamplingRate);
 
     /**
      * Factory method to create appropriate trainer based on compression parameters.

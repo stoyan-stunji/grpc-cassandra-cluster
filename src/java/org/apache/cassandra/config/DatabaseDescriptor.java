@@ -1236,6 +1236,9 @@ public class DatabaseDescriptor
         {
             throw new ConfigurationException(ex.getMessage());
         }
+
+        if (conf.compression_dictionary_training_sampling_rate <= 0.0f || conf.compression_dictionary_training_sampling_rate > 1.0f)
+            throw new ConfigurationException("Sampling rate has to be between (0.0;1], it is " + conf.compression_dictionary_training_sampling_rate);
     }
 
     @VisibleForTesting
