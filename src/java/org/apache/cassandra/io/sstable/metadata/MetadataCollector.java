@@ -249,6 +249,10 @@ public class MetadataCollector implements PartitionStatisticsCollector
         long timestamp;
         int ttl;
         long localDeletionTime;
+        // This method may process several implementations of Cell.
+        // To improve inlining of Cell method calls, we split the call sites.
+        // This is a very hot path, invoked for every cell (potentially millions of times per second),
+        // so this micro-optimization is justified.
         if (cell.getClass() == ArrayCell.class)
         {
             timestamp = cell.timestamp();

@@ -599,7 +599,7 @@ public abstract class AbstractType<T> implements Comparator<ByteBuffer>, Assignm
                                                     expectedValueLength, actualValueLength));
         }
         else
-        {;
+        {
             accessor.writeWithVIntLength(valueHolder, i, out);
         }
     }
