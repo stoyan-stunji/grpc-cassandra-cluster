@@ -18,9 +18,14 @@
 
 package org.apache.cassandra.exceptions;
 
+import java.io.IOException;
+import java.util.HashMap;
 import java.util.Map;
 
 import org.apache.cassandra.db.ConsistencyLevel;
+import org.apache.cassandra.db.TypeSizes;
+import org.apache.cassandra.io.util.DataInputPlus;
+import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.locator.InetAddressAndPort;
 
 public class QueryReferencesTooManyIndexesAbortException extends ReadAbortException
@@ -33,5 +38,52 @@ public class QueryReferencesTooManyIndexesAbortException extends ReadAbortExcept
         super(msg, consistency, received, blockFor, dataPresent, failureReasonByEndpoint);
         this.nodes = nodes;
         this.maxValue = maxValue;
+    }
+
+    @Override
+    protected void serializeSpecificFields(DataOutputPlus out, int version) throws IOException
+    {
+        // Serialize parent fields first
+        super.serializeSpecificFields(out, version);
+        // Add QueryReferencesTooManyIndexesAbortException specific fields
+        out.writeInt(nodes);
+        out.writeLong(maxValue);
+    }
+
+    @Override
+    protected long serializedSizeSpecificFields(int version)
+    {
+        return super.serializedSizeSpecificFields(version) +
+               TypeSizes.INT_SIZE +  // nodes
+               TypeSizes.LONG_SIZE;  // maxValue
+    }
+
+    static QueryReferencesTooManyIndexesAbortException deserializeFields(String message, DataInputPlus in, int version) throws IOException
+    {
+        ConsistencyLevel consistency = ConsistencyLevel.fromCode(in.readUnsignedByte());
+        int received = in.readInt();
+        int blockFor = in.readInt();
+
+        // Deserialize failure reason map
+        int mapSize = in.readInt();
+        Map<InetAddressAndPort, RequestFailureReason> failures = new HashMap<>(mapSize);
+        for (int i = 0; i < mapSize; i++)
+        {
+            InetAddressAndPort endpoint = InetAddressAndPort.Serializer.inetAddressAndPortSerializer.deserialize(in, version);
+            RequestFailureReason reason = RequestFailureReason.fromCode(in.readShort());
+            failures.put(endpoint, reason);
+        }
+
+        boolean dataPresent = in.readBoolean();
+        int nodes = in.readInt();
+        long maxValue = in.readLong();
+
+        return new QueryReferencesTooManyIndexesAbortException(message, nodes, maxValue, dataPresent, consistency, received, blockFor, failures);
+    }
+
+    @Override
+    public CassandraExceptionCode getCassandraExceptionCode()
+    {
+        return CassandraExceptionCode.QUERY_TOO_MANY_INDEXES_ABORT;
     }
 }

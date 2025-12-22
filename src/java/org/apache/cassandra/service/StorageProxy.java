@@ -54,6 +54,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import accord.primitives.Txn;
+import org.agrona.collections.IntHashSet;
 import org.apache.cassandra.batchlog.Batch;
 import org.apache.cassandra.batchlog.BatchlogManager;
 import org.apache.cassandra.concurrent.DebuggableTask.RunnableDebuggableTask;
@@ -62,6 +63,7 @@ import org.apache.cassandra.config.AccordSpec;
 import org.apache.cassandra.config.CassandraRelevantProperties;
 import org.apache.cassandra.config.Config;
 import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.cql3.statements.CQL3CasRequest;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.db.CounterMutation;
@@ -69,6 +71,7 @@ import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.EmptyIterators;
 import org.apache.cassandra.db.IMutation;
 import org.apache.cassandra.db.Keyspace;
+import org.apache.cassandra.db.KeyspaceNotDefinedException;
 import org.apache.cassandra.db.MessageParams;
 import org.apache.cassandra.db.Mutation;
 import org.apache.cassandra.db.PartitionPosition;
@@ -88,10 +91,12 @@ import org.apache.cassandra.db.partitions.PartitionUpdate;
 import org.apache.cassandra.db.partitions.UnfilteredPartitionIterator;
 import org.apache.cassandra.db.rows.RowIterator;
 import org.apache.cassandra.db.view.ViewUtils;
+import org.apache.cassandra.db.guardrails.GuardrailViolatedException;
 import org.apache.cassandra.dht.AbstractBounds;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.exceptions.CasWriteTimeoutException;
 import org.apache.cassandra.exceptions.CasWriteUnknownResultException;
+import org.apache.cassandra.exceptions.CassandraException;
 import org.apache.cassandra.exceptions.CoordinatorBehindException;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.exceptions.IsBootstrappingException;
@@ -108,6 +113,7 @@ import org.apache.cassandra.exceptions.UnavailableException;
 import org.apache.cassandra.exceptions.WriteFailureException;
 import org.apache.cassandra.exceptions.WriteTimeoutException;
 import org.apache.cassandra.gms.Gossiper;
+import org.apache.cassandra.gms.FailureDetector;
 import org.apache.cassandra.hints.Hint;
 import org.apache.cassandra.hints.HintsService;
 import org.apache.cassandra.locator.AbstractReplicationStrategy;
@@ -128,9 +134,13 @@ import org.apache.cassandra.net.ForwardingInfo;
 import org.apache.cassandra.net.Message;
 import org.apache.cassandra.net.MessageFlag;
 import org.apache.cassandra.net.MessagingService;
+import org.apache.cassandra.net.NoPayload;
 import org.apache.cassandra.net.RequestCallback;
 import org.apache.cassandra.net.Verb;
+import org.apache.cassandra.replication.MutationId;
+import org.apache.cassandra.replication.MutationTrackingService;
 import org.apache.cassandra.replication.TrackedWriteRequest;
+import org.apache.cassandra.schema.KeyspaceMetadata;
 import org.apache.cassandra.schema.PartitionDenylist;
 import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.schema.SchemaConstants;
@@ -158,9 +168,14 @@ import org.apache.cassandra.service.consensus.migration.ConsensusRequestRouter.C
 import org.apache.cassandra.service.consensus.migration.ConsensusRequestRouter.SplitReads;
 import org.apache.cassandra.service.consensus.migration.TransactionalMigrationFromMode;
 import org.apache.cassandra.service.paxos.Ballot;
+import org.apache.cassandra.service.paxos.CasForwardRequest;
+import org.apache.cassandra.service.paxos.CasForwardResponse;
 import org.apache.cassandra.service.paxos.Commit;
+import org.apache.cassandra.service.paxos.ConsensusReadForwardRequest;
+import org.apache.cassandra.service.paxos.ConsensusReadForwardResponse;
 import org.apache.cassandra.service.paxos.ContentionStrategy;
 import org.apache.cassandra.service.paxos.Paxos;
+import org.apache.cassandra.service.paxos.PaxosCommitForwardRequest;
 import org.apache.cassandra.service.paxos.PaxosState;
 import org.apache.cassandra.service.paxos.v1.PrepareCallback;
 import org.apache.cassandra.service.paxos.v1.ProposeCallback;
@@ -183,11 +198,14 @@ import org.apache.cassandra.utils.NoSpamLogger;
 import org.apache.cassandra.utils.Pair;
 import org.apache.cassandra.utils.Throwables;
 import org.apache.cassandra.utils.TimeUUID;
+import org.apache.cassandra.utils.concurrent.AsyncPromise;
 import org.apache.cassandra.utils.concurrent.CountDownLatch;
 import org.apache.cassandra.utils.concurrent.Future;
+import org.apache.cassandra.utils.concurrent.Promise;
 import org.apache.cassandra.utils.concurrent.UncheckedInterruptedException;
 
 import static accord.primitives.Txn.Kind.Read;
+import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.collect.Iterables.concat;
 import static java.util.Collections.singleton;
@@ -205,8 +223,10 @@ import static org.apache.cassandra.metrics.ClientRequestsMetricsHolder.writeMetr
 import static org.apache.cassandra.net.Message.out;
 import static org.apache.cassandra.net.NoPayload.noPayload;
 import static org.apache.cassandra.net.Verb.BATCH_STORE_REQ;
+import static org.apache.cassandra.net.Verb.CONSENSUS_READ_FORWARD_REQ;
 import static org.apache.cassandra.net.Verb.MUTATION_REQ;
 import static org.apache.cassandra.net.Verb.PAXOS_COMMIT_REQ;
+import static org.apache.cassandra.net.Verb.PAXOS_COMMIT_FORWARD_REQ;
 import static org.apache.cassandra.net.Verb.PAXOS_PREPARE_REQ;
 import static org.apache.cassandra.net.Verb.PAXOS_PROPOSE_REQ;
 import static org.apache.cassandra.net.Verb.SCHEMA_VERSION_REQ;
@@ -370,12 +390,54 @@ public class StorageProxy implements StorageProxyMBean
                                   Dispatcher.RequestTime requestTime)
     throws UnavailableException, IsBootstrappingException, RequestFailureException, RequestTimeoutException, InvalidRequestException, CasWriteUnknownResultException
     {
+        return casInternal(keyspaceName, cfName, key, request, consistencyForPaxos, consistencyForCommit,
+                          clientState, nowInSeconds, requestTime, false);
+    }
+
+    /**
+     * Version of cas called by handlers that have already received a forwarded request.
+     * This prevents infinite forwarding loops if the forwarding target is not actually a replica.
+     */
+    public static RowIterator casForwarded(String keyspaceName,
+                                           String cfName,
+                                           DecoratedKey key,
+                                           CASRequest request,
+                                           ConsistencyLevel consistencyForPaxos,
+                                           ConsistencyLevel consistencyForCommit,
+                                           ClientState clientState,
+                                           long nowInSeconds,
+                                           Dispatcher.RequestTime requestTime)
+    throws UnavailableException, IsBootstrappingException, RequestFailureException, RequestTimeoutException, InvalidRequestException, CasWriteUnknownResultException
+    {
+        return casInternal(keyspaceName, cfName, key, request, consistencyForPaxos, consistencyForCommit,
+                          clientState, nowInSeconds, requestTime, true);
+    }
+
+    private static RowIterator casInternal(String keyspaceName,
+                                           String cfName,
+                                           DecoratedKey key,
+                                           CASRequest request,
+                                           ConsistencyLevel consistencyForPaxos,
+                                           ConsistencyLevel consistencyForCommit,
+                                           ClientState clientState,
+                                           long nowInSeconds,
+                                           Dispatcher.RequestTime requestTime,
+                                           boolean alreadyForwarded)
+    throws UnavailableException, IsBootstrappingException, RequestFailureException, RequestTimeoutException, InvalidRequestException, CasWriteUnknownResultException
+    {
         if (DatabaseDescriptor.getPartitionDenylistEnabled() && DatabaseDescriptor.getDenylistWritesEnabled() && !partitionDenylist.isKeyPermitted(keyspaceName, cfName, key.getKey()))
         {
             denylistMetrics.incrementWritesRejected();
             throw new InvalidRequestException(String.format("Unable to CAS write to denylisted partition [0x%s] in %s/%s",
                                                             key, keyspaceName, cfName));
         }
+
+        // Check if this CAS operation needs to be forwarded to a replica coordinator for tracked keyspaces
+        RowIterator forwardResult = checkAndForwardCasIfNeeded(keyspaceName, cfName, key, request,
+                                                               consistencyForPaxos, consistencyForCommit,
+                                                               clientState, nowInSeconds, requestTime, alreadyForwarded);
+        if (forwardResult != null)
+            return forwardResult;
 
         ConsensusAttemptResult lastAttemptResult = null;
         do
@@ -425,7 +487,7 @@ public class StorageProxy implements StorageProxyMBean
         return lastAttemptResult.casResult;
     }
 
-    private static ConsensusAttemptResult legacyCas(TableMetadata metadata,
+private static ConsensusAttemptResult legacyCas(TableMetadata metadata,
                                                     DecoratedKey key,
                                                     CASRequest request,
                                                     ConsistencyLevel consistencyForPaxos,
@@ -455,6 +517,14 @@ public class StorageProxy implements StorageProxyMBean
                     Tracing.trace("CAS precondition does not match current values {}", current);
                     casWriteMetrics.conditionNotMet.inc();
                     return Pair.create(PartitionUpdate.emptyUpdate(metadata, key), current.rowIterator(false));
+                }
+
+                // Condition check only mode - if conditions are met, return success without making updates
+                // This is used for deferred guardrail exception handling
+                if (request.isConditionCheckOnly())
+                {
+                    Tracing.trace("CAS condition-check-only: precondition is met; returning success without updates");
+                    return Pair.create(PartitionUpdate.emptyUpdate(metadata, key), null);
                 }
 
                 // Create the desired updates
@@ -623,7 +693,7 @@ public class StorageProxy implements StorageProxyMBean
                     // because we also skip replaying those same empty update in beginAndRepairPaxos (see the longer
                     // comment there). As empty update are somewhat common (serial reads and non-applying CAS propose
                     // them), this is worth bothering.
-                    if (!proposal.update.isEmpty())
+                    if (!proposal.isEmpty())
                         commitPaxos(proposal, consistencyForCommit, true, requestTime);
                     RowIterator result = proposalPair.right;
                     if (result != null)
@@ -728,7 +798,7 @@ public class StorageProxy implements StorageProxyMBean
                 //     replayed in that case.
                 // Tl;dr, it is safe to skip committing empty updates _as long as_ we also skip replying them below. And
                 // doing is more efficient, so we do so.
-                if (!inProgress.update.isEmpty() && inProgress.isAfter(mostRecent))
+                if (!inProgress.isEmpty() && inProgress.isAfter(mostRecent))
                 {
                     Tracing.trace("Finishing incomplete paxos round {}", inProgress);
                     casMetrics.unfinishedCommit.inc();
@@ -788,7 +858,7 @@ public class StorageProxy implements StorageProxyMBean
     private static PrepareCallback preparePaxos(Commit toPrepare, ReplicaPlan.ForPaxosWrite replicaPlan, Dispatcher.RequestTime requestTime)
     throws WriteTimeoutException
     {
-        PrepareCallback callback = new PrepareCallback(toPrepare.update.partitionKey(), toPrepare.update.metadata(), replicaPlan.requiredParticipants(), replicaPlan.consistencyLevel(), requestTime);
+        PrepareCallback callback = new PrepareCallback(toPrepare.partitionKey(), toPrepare.metadata(), replicaPlan.requiredParticipants(), replicaPlan.consistencyLevel(), requestTime);
         Message<Commit> message = Message.out(PAXOS_PREPARE_REQ, toPrepare);
 
         boolean hasLocalRequest = false;
@@ -868,10 +938,95 @@ public class StorageProxy implements StorageProxyMBean
 
     private static void commitPaxos(Commit proposal, ConsistencyLevel consistencyLevel, boolean allowHints, Dispatcher.RequestTime requestTime) throws WriteTimeoutException
     {
-        boolean shouldBlock = consistencyLevel != ConsistencyLevel.ANY;
-        Keyspace keyspace = Keyspace.open(proposal.update.metadata().keyspace);
+        checkArgument(!proposal.isEmpty());
+        // Check if this is a tracked keyspace
+        String keyspaceName = proposal.metadata().keyspace;
+        Keyspace keyspace = Keyspace.openIfExists(keyspaceName);
+        if (keyspace == null)
+            throw new KeyspaceNotDefinedException("Keyspace " + keyspaceName + " does not exist");
+        KeyspaceMetadata ksMetadata = keyspace.getMetadata();
+        
+        if (ksMetadata.params.replicationType.isTracked())
+        {
+            // For tracked keyspaces, check if we need to forward or execute directly
+            Token tk = proposal.partitionKey().getToken();
+            ReplicaPlan.ForWrite replicaPlan = ReplicaPlans.forWrite(keyspace, consistencyLevel, tk, ReplicaPlans.writeAll);
+            
+            if (isTrackedKeyspaceRequiringPaxosCommitForwarding(ksMetadata, proposal, replicaPlan.liveAndDown()))
+            {
+                // Forward to a replica coordinator
+                forwardPaxosCommit(proposal, consistencyLevel, replicaPlan);
+            }
+            else
+            {
+                // Execute directly using tracked logic
+                commitPaxosTracked(keyspace, proposal, consistencyLevel, requestTime);
+            }
+        }
+        else
+        {
+            // For untracked keyspaces, use existing logic
+            commitPaxosUntracked(keyspace, proposal, consistencyLevel, allowHints, requestTime);
+        }
+    }
 
-        Token tk = proposal.update.partitionKey().getToken();
+    public static void commitPaxosTracked(Keyspace keyspace, Commit proposal, ConsistencyLevel consistencyLevel, Dispatcher.RequestTime requestTime) throws WriteTimeoutException
+    {
+        boolean shouldBlock = consistencyLevel != ConsistencyLevel.ANY;
+        String keyspaceName = proposal.metadata().keyspace;
+        Token tk = proposal.partitionKey().getToken();
+
+        // Generate mutation ID for tracked keyspace
+        MutationId mutationId = MutationTrackingService.instance.nextMutationId(keyspaceName, tk);
+        Mutation mutationWithId = proposal.makeMutation(mutationId);
+        proposal = Commit.create(proposal.ballot, mutationWithId);
+
+        // NOTE: this ReplicaPlan is a lie, this usage of ReplicaPlan could do with being clarified - the selected() collection is essentially (I think) never used
+        ReplicaPlan.ForWrite replicaPlan = ReplicaPlans.forWrite(keyspace, consistencyLevel, tk, ReplicaPlans.writeAll);
+        AbstractReplicationStrategy rs = replicaPlan.replicationStrategy();
+
+        // Always create tracked response handler even if not blocking
+        AbstractWriteResponseHandler<?> responseHandler = rs.getWriteResponseHandler(replicaPlan, null, WriteType.SIMPLE, null, requestTime);
+        responseHandler = TrackedWriteResponseHandler.wrap(responseHandler, mutationId);
+
+        // Collect remote replicas for tracking service
+        IntHashSet remoteReplicas = new IntHashSet();
+        // Send messages to replicas
+        Message<Commit> message = Message.outWithFlag(PAXOS_COMMIT_REQ, proposal, MessageFlag.CALL_BACK_ON_FAILURE);
+        for (Replica replica : replicaPlan.liveAndDown())
+        {
+            InetAddressAndPort destination = replica.endpoint();
+            boolean replicaIsSelf = replica.isSelf();
+            if (!replicaIsSelf)
+                remoteReplicas.add(ClusterMetadata.current().directory.peerId(replica.endpoint()).id());
+
+            if (shouldBlock)
+            {
+                if (replicaIsSelf)
+                    commitPaxosLocal(replica, message, responseHandler, requestTime);
+                else
+                    MessagingService.instance().sendWriteWithCallback(message, replica, responseHandler);
+            }
+            else
+            {
+                MessagingService.instance().send(message, destination);
+            }
+        }
+
+        // Register write request with tracking service
+        if (!remoteReplicas.isEmpty())
+            MutationTrackingService.instance.sentWriteRequest(proposal.makeMutation(), remoteReplicas);
+
+        if (shouldBlock)
+            responseHandler.get();
+    }
+
+    private static void commitPaxosUntracked(Keyspace keyspace, Commit proposal, ConsistencyLevel consistencyLevel, boolean allowHints, Dispatcher.RequestTime requestTime) throws WriteTimeoutException
+    {
+        boolean shouldBlock = consistencyLevel != ConsistencyLevel.ANY;
+        PartitionUpdate update = proposal.update;
+
+        Token tk = update.partitionKey().getToken();
 
         AbstractWriteResponseHandler<Commit> responseHandler = null;
         // NOTE: this ReplicaPlan is a lie, this usage of ReplicaPlan could do with being clarified - the selected() collection is essentially (I think) never used
@@ -956,6 +1111,83 @@ public class StorageProxy implements StorageProxyMBean
                 return PAXOS_COMMIT_REQ;
             }
         });
+    }
+
+    /**
+     * Checks if this commit needs to be forwarded to a replica coordinator for tracked keyspace support.
+     */
+    private static boolean isTrackedKeyspaceRequiringPaxosCommitForwarding(KeyspaceMetadata ksMetadata, Commit proposal, EndpointsForToken participants)
+    {
+        if (!ksMetadata.params.replicationType.isTracked())
+            return false;
+            
+        // Check if current coordinator is not a replica
+        InetAddressAndPort localEndpoint = FBUtilities.getBroadcastAddressAndPort();
+        boolean isLocalReplica = participants.endpoints().contains(localEndpoint);
+        return !isLocalReplica;
+    }
+
+    /**
+     * Forwards a Paxos V1 commit operation to a replica coordinator for tracked keyspaces.
+     * Uses the replica plan to select the best live, non-local replica based on proximity.
+     */
+    private static void forwardPaxosCommit(Commit proposal, ConsistencyLevel consistencyLevel, ReplicaPlan.ForWrite replicaPlan) throws WriteTimeoutException
+    {
+        InetAddressAndPort localEndpoint = FBUtilities.getBroadcastAddressAndPort();
+        
+        // Get live replicas and filter out local node
+        EndpointsForToken liveReplicas = replicaPlan.live().filter(replica -> !replica.endpoint().equals(localEndpoint));
+        
+        if (liveReplicas.isEmpty())
+        {
+            // No live replica available, throw exception
+            throw new WriteTimeoutException(WriteType.CAS, consistencyLevel, 0, consistencyLevel.blockFor(replicaPlan.replicationStrategy()));
+        }
+        
+        // Sort by proximity and select the best coordinator
+        EndpointsForToken sortedReplicas = DatabaseDescriptor.getNodeProximity().sortedByProximity(localEndpoint, liveReplicas);
+        InetAddressAndPort replicaCoordinator = sortedReplicas.get(0).endpoint();
+        
+        // Create forward request with participant list
+        PaxosCommitForwardRequest forwardRequest = new PaxosCommitForwardRequest(proposal, consistencyLevel);
+        Message<PaxosCommitForwardRequest> message = Message.out(PAXOS_COMMIT_FORWARD_REQ, forwardRequest);
+        
+        // Use AsyncPromise for proper callback handling
+        Promise<NoPayload> promise = new AsyncPromise<>();
+        
+        RequestCallback<NoPayload> callback = new RequestCallback<NoPayload>()
+        {
+            @Override
+            public void onResponse(Message<NoPayload> response)
+            {
+                promise.setSuccess(response.payload);
+            }
+
+            @Override
+            public void onFailure(InetAddressAndPort from, RequestFailure reason)
+            {
+                promise.setFailure(new WriteTimeoutException(WriteType.CAS, consistencyLevel, 0, consistencyLevel.blockFor(replicaPlan.replicationStrategy())));
+            }
+        };
+        
+        try
+        {
+            MessagingService.instance().sendWithCallback(message, replicaCoordinator, callback);
+            
+            // Wait for response with timeout
+            promise.get(DatabaseDescriptor.getWriteRpcTimeout(java.util.concurrent.TimeUnit.MILLISECONDS), java.util.concurrent.TimeUnit.MILLISECONDS);
+        }
+        catch (TimeoutException e)
+        {
+            throw new WriteTimeoutException(WriteType.CAS, consistencyLevel, 0, consistencyLevel.blockFor(replicaPlan.replicationStrategy()));
+        }
+        catch (Exception e)
+        {
+            if (e instanceof WriteTimeoutException)
+                throw (WriteTimeoutException) e;
+            
+            throw new WriteTimeoutException(WriteType.CAS, consistencyLevel, 0, consistencyLevel.blockFor(replicaPlan.replicationStrategy()));
+        }
     }
 
     /**
@@ -2305,9 +2537,30 @@ public class StorageProxy implements StorageProxyMBean
                                                                     isForWrite);
     }
 
-    private static PartitionIterator readWithConsensus(SinglePartitionReadCommand.Group group, ConsistencyLevel consistencyLevel, Dispatcher.RequestTime requestTime)
+    public static PartitionIterator readWithConsensus(SinglePartitionReadCommand.Group group, ConsistencyLevel consistencyLevel, Dispatcher.RequestTime requestTime)
     throws InvalidRequestException, UnavailableException, ReadFailureException, ReadTimeoutException
     {
+        return readWithConsensusInternal(group, consistencyLevel, requestTime, false);
+    }
+
+    /**
+     * Version of readWithConsensus called by handlers that have already received a forwarded request.
+     * This prevents infinite forwarding loops if the forwarding target is not actually a replica.
+     */
+    public static PartitionIterator readWithConsensusForwarded(SinglePartitionReadCommand.Group group, ConsistencyLevel consistencyLevel, Dispatcher.RequestTime requestTime)
+    throws InvalidRequestException, UnavailableException, ReadFailureException, ReadTimeoutException
+    {
+        return readWithConsensusInternal(group, consistencyLevel, requestTime, true);
+    }
+
+    private static PartitionIterator readWithConsensusInternal(SinglePartitionReadCommand.Group group, ConsistencyLevel consistencyLevel, Dispatcher.RequestTime requestTime, boolean alreadyForwarded)
+    throws InvalidRequestException, UnavailableException, ReadFailureException, ReadTimeoutException
+    {
+        // Check if this consensus read needs to be forwarded to a replica coordinator for tracked keyspaces
+        PartitionIterator forwardResult = checkAndForwardConsensusReadIfNeeded(group, consistencyLevel, requestTime, alreadyForwarded);
+        if (forwardResult != null)
+            return forwardResult;
+
         ConsensusAttemptResult lastResult;
         do
         {
@@ -3658,6 +3911,16 @@ public class StorageProxy implements StorageProxyMBean
         {
             return new ConsensusAttemptResult(casResult, null, false);
         }
+
+        /**
+         * Get the CAS result row iterator.
+         * @return the CAS result, or null if this was not a CAS operation result
+         */
+        @Nullable
+        public RowIterator getCasResult()
+        {
+            return casResult;
+        }
     }
 
     @Override
@@ -3924,5 +4187,208 @@ public class StorageProxy implements StorageProxyMBean
     public void setClientRequestSizeMetricsEnabled(boolean enabled)
     {
         DatabaseDescriptor.setClientRequestSizeMetricsEnabled(enabled);
+    }
+
+    /**
+     * Check if a CAS operation needs to be forwarded to a replica coordinator for tracked keyspaces.
+     * Returns null if no forwarding is needed, or the result of the forwarded operation.
+     */
+    private static RowIterator checkAndForwardCasIfNeeded(String keyspaceName,
+                                                         String cfName,
+                                                         DecoratedKey key,
+                                                         CASRequest request,
+                                                         ConsistencyLevel consistencyForPaxos,
+                                                         ConsistencyLevel consistencyForCommit,
+                                                         ClientState clientState,
+                                                         long nowInSeconds,
+                                                         Dispatcher.RequestTime requestTime,
+                                                         boolean alreadyForwarded)
+    throws UnavailableException, RequestFailureException, RequestTimeoutException
+    {
+        // Get keyspace metadata to check if it's tracked
+        Keyspace keyspace = Keyspace.openIfExists(keyspaceName);
+        if (keyspace == null)
+            throw new KeyspaceNotDefinedException("Keyspace " + keyspaceName + " does not exist");
+
+        KeyspaceMetadata ksMetadata = keyspace.getMetadata();
+        if (!ksMetadata.params.replicationType.isTracked())
+            return null; // Not tracked, no forwarding needed
+
+        // Check if current coordinator is not a replica
+        Token tk = key.getToken();
+        EndpointsForToken allReplicas = ReplicaLayout.forTokenWriteLiveAndDown(ClusterMetadata.current(), keyspace, tk)
+                                                     .all();
+        EndpointsForToken liveReplicas = allReplicas.filter(FailureDetector.isReplicaAlive);
+
+        InetAddressAndPort localEndpoint = FBUtilities.getBroadcastAddressAndPort();
+        boolean isLocalReplica = allReplicas.contains(localEndpoint);
+
+        if (isLocalReplica)
+            return null; // Local node is a replica, no forwarding needed
+
+        // If this request was already forwarded to us and we're not a replica, something is wrong
+        if (alreadyForwarded)
+        {
+            logger.error("Received forwarded CAS for keyspace {} table {} key {} but local node {} is not a replica. Replicas are: {}",
+                        keyspaceName, cfName, key, localEndpoint, allReplicas);
+            Tracing.trace("ERROR: Received forwarded CAS but local node is not a replica");
+            throw new InvalidRequestException("Forwarded CAS received by non-replica node " + localEndpoint);
+        }
+
+        // Find best replica to forward to using proximity-based selection
+        if (liveReplicas.isEmpty())
+            throw new UnavailableException("No live replicas available for CAS forwarding", consistencyForPaxos, 1, 0);
+
+        // Sort by proximity and select the best coordinator
+        EndpointsForToken sortedReplicas = DatabaseDescriptor.getNodeProximity().sortedByProximity(localEndpoint, liveReplicas);
+        InetAddressAndPort replicaCoordinator = sortedReplicas.get(0).endpoint();
+
+        // Create forward request
+        CasForwardRequest forwardRequest = new CasForwardRequest(keyspaceName, cfName, key, (CQL3CasRequest) request,
+                                                               consistencyForPaxos, consistencyForCommit,
+                                                               clientState, nowInSeconds);
+        Message<CasForwardRequest> message = Message.out(Verb.CAS_FORWARD_REQ, forwardRequest);
+
+        try
+        {
+            // Send synchronous request to replica coordinator
+            Object responseObj = MessagingService.instance().sendWithResult(message, replicaCoordinator).get();
+            @SuppressWarnings("unchecked")
+            Message<CasForwardResponse> responseMessage = (Message<CasForwardResponse>) responseObj;
+            CasForwardResponse response = responseMessage.payload;
+
+            // Add warnings from forwarded operation to local ClientWarn
+            if (response.warnings != null)
+            {
+                for (String warning : response.warnings)
+                    ClientWarn.instance.warn(warning);
+            }
+
+            // Check if the forwarded operation had an exception
+            if (!response.isSuccess())
+            {
+                // Discard deferred warnings since the operation failed
+                ClientWarn.instance.discardDeferredWarnings();
+                throw response.exception;
+            }
+
+            // Commit or discard deferred warnings based on whether conditions passed
+            if (response.result == null)
+                ClientWarn.instance.commitDeferredWarnings();
+            else
+                ClientWarn.instance.discardDeferredWarnings();
+
+            // Check for deferred guardrail exception - if conditions passed (result is null)
+            // and we have a stored guardrail exception, throw it now (AFTER committing warnings)
+            CQL3CasRequest casRequest = (CQL3CasRequest) request;
+            if (response.result == null && casRequest.getStoredGuardrailException() != null)
+                throw GuardrailViolatedException.wrapForDeferredThrow(casRequest.getStoredGuardrailException());
+
+            return response.result;
+        }
+        catch (CassandraException ce)
+        {
+            // Discard deferred warnings since the operation failed
+            ClientWarn.instance.discardDeferredWarnings();
+            // Rethrow CassandraExceptions from the replica coordinator
+            throw ce;
+        }
+        catch (Exception e)
+        {
+            // Discard deferred warnings since the operation failed
+            ClientWarn.instance.discardDeferredWarnings();
+            throw new RuntimeException("Failed to forward CAS operation to replica coordinator", e);
+        }
+    }
+
+    /**
+     * Check if a consensus read operation needs to be forwarded to a replica coordinator for tracked keyspaces.
+     * Returns null if no forwarding is needed, or the result of the forwarded operation.
+     */
+    private static PartitionIterator checkAndForwardConsensusReadIfNeeded(SinglePartitionReadCommand.Group group,
+                                                                         ConsistencyLevel consistencyLevel,
+                                                                         Dispatcher.RequestTime requestTime,
+                                                                         boolean alreadyForwarded)
+    throws UnavailableException, ReadFailureException, ReadTimeoutException
+    {
+        if (group.queries.isEmpty())
+            return null;
+
+        // Use the first command to determine keyspace and key for replica planning
+        SinglePartitionReadCommand firstCommand = group.queries.get(0);
+        String keyspaceName = firstCommand.metadata().keyspace;
+
+        // Get keyspace metadata to check if it's tracked
+        Keyspace keyspace = Keyspace.openIfExists(keyspaceName);
+        if (keyspace == null)
+            throw new KeyspaceNotDefinedException("Keyspace " + keyspaceName + " does not exist");
+
+        KeyspaceMetadata ksMetadata = keyspace.getMetadata();
+        if (!ksMetadata.params.replicationType.isTracked())
+            return null; // Not tracked, no forwarding needed
+
+        // Check if current coordinator is not a replica
+        Token tk = firstCommand.partitionKey().getToken();
+        EndpointsForToken allReplicas = ReplicaLayout.forTokenWriteLiveAndDown(ClusterMetadata.current(), keyspace, tk)
+                                                     .all();
+        EndpointsForToken liveReplicas = allReplicas.filter(FailureDetector.isReplicaAlive);
+
+        InetAddressAndPort localEndpoint = FBUtilities.getBroadcastAddressAndPort();
+        boolean isLocalReplica = allReplicas.contains(localEndpoint);
+
+        if (isLocalReplica)
+            return null; // Local node is a replica, no forwarding needed
+
+        // If this request was already forwarded to us and we're not a replica, something is wrong
+        if (alreadyForwarded)
+        {
+            logger.error("Received forwarded consensus read for keyspace {} key {} but local node {} is not a replica. Replicas are: {}",
+                        keyspaceName, firstCommand.partitionKey(), localEndpoint, allReplicas);
+            Tracing.trace("ERROR: Received forwarded consensus read but local node is not a replica");
+            throw new RuntimeException("Forwarded consensus read received by non-replica node " + localEndpoint);
+        }
+
+        // Find best replica to forward to using proximity-based selection
+        if (liveReplicas.isEmpty())
+            throw new UnavailableException("No live replicas available for consensus read forwarding", consistencyLevel, 1, 0);
+
+        // Sort by proximity and select the best coordinator
+        EndpointsForToken sortedReplicas = DatabaseDescriptor.getNodeProximity().sortedByProximity(localEndpoint, liveReplicas);
+        InetAddressAndPort replicaCoordinator = sortedReplicas.get(0).endpoint();
+
+        // Create forward request - consensus reads only have a single command
+        ConsensusReadForwardRequest forwardRequest = new ConsensusReadForwardRequest(firstCommand, consistencyLevel);
+        Message<ConsensusReadForwardRequest> message = Message.out(CONSENSUS_READ_FORWARD_REQ, forwardRequest);
+
+        try
+        {
+            // Send synchronous request to replica coordinator
+            Object responseObj = MessagingService.instance().sendWithResult(message, replicaCoordinator).get();
+            @SuppressWarnings("unchecked")
+            Message<ConsensusReadForwardResponse> responseMessage = (Message<ConsensusReadForwardResponse>) responseObj;
+            ConsensusReadForwardResponse response = responseMessage.payload;
+
+            // Add warnings from forwarded operation to local ClientWarn
+            if (response.warnings != null)
+            {
+                for (String warning : response.warnings)
+                    ClientWarn.instance.warn(warning);
+            }
+
+            // Check if the forwarded operation had an exception
+            if (!response.isSuccess())
+                throw response.exception;
+
+            return response.getResult();
+        }
+        catch (CassandraException ce)
+        {
+            // Rethrow CassandraExceptions from the replica coordinator
+            throw ce;
+        }
+        catch (Exception e)
+        {
+            throw new RuntimeException("Failed to forward consensus read operation to replica coordinator", e);
+        }
     }
 }

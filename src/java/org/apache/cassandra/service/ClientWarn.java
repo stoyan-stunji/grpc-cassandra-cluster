@@ -19,6 +19,7 @@ package org.apache.cassandra.service;
 
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.List;
+import java.util.function.Consumer;
 
 import org.apache.cassandra.concurrent.ExecutorLocals;
 import org.apache.cassandra.utils.FBUtilities;
@@ -87,6 +88,74 @@ public class ClientWarn extends ExecutorLocals.Impl
         set(null);
     }
 
+    /**
+     * Start deferring warnings. Any warnings added after this call will be stored
+     * separately and can later be committed (inserted at the marked position) or discarded.
+     * The insertion point is recorded as the current size of the warnings list.
+     * <p>
+     * This is used for CAS operations where we don't want to emit warnings until
+     * we know whether the conditions passed.
+     */
+    public void startDeferring()
+    {
+        State state = get();
+        if (state != null)
+            state.startDeferring();
+    }
+
+    /**
+     * Check if we're currently deferring warnings.
+     */
+    public boolean isDeferring()
+    {
+        State state = get();
+        return state != null && state.isDeferring();
+    }
+
+    /**
+     * Commit deferred warnings by inserting them at the recorded insertion point.
+     * After this call, deferring mode is disabled.
+     *
+     * @param replayAction optional consumer to receive deferred actions for replay (e.g., guardrail diagnostic events)
+     */
+    public void commitDeferredWarnings(Consumer<Runnable> replayAction)
+    {
+        State state = get();
+        if (state != null)
+            state.commitDeferredWarnings(replayAction);
+    }
+
+    /**
+     * Commit deferred warnings by inserting them at the recorded insertion point.
+     * After this call, deferring mode is disabled.
+     */
+    public void commitDeferredWarnings()
+    {
+        commitDeferredWarnings(Runnable::run);
+    }
+
+    /**
+     * Discard all deferred warnings without adding them to the main warnings list.
+     * After this call, deferring mode is disabled.
+     */
+    public void discardDeferredWarnings()
+    {
+        State state = get();
+        if (state != null)
+            state.discardDeferredWarnings();
+    }
+
+    /**
+     * Store a deferred action to be executed when warnings are committed.
+     * This is used to defer guardrail diagnostic events until we know conditions passed.
+     */
+    public void addDeferredAction(Runnable action)
+    {
+        State state = get();
+        if (state != null)
+            state.addDeferredAction(action);
+    }
+
     public static class State
     {
         private boolean collecting = true;
@@ -94,16 +163,46 @@ public class ClientWarn extends ExecutorLocals.Impl
         // from shared state, so multiple threads can reference the same State.
         private volatile List<String> warnings;
 
+        // Deferred warnings support for CAS operations
+        // These must also be thread-safe since State can be shared across threads
+        private volatile List<String> deferredWarnings;
+        private volatile List<Runnable> deferredActions;
+        private volatile int insertionPoint = -1;
+
         private void add(String warning)
         {
             if (warnings == null)
-                synchronized (this) {
-                    if (warnings == null) {
+                synchronized (this)
+                {
+                    if (warnings == null)
+                    {
                         warnings = new CopyOnWriteArrayList<>();
                     }
                 }
-            if (collecting && warnings.size() < FBUtilities.MAX_UNSIGNED_SHORT)
-                warnings.add(maybeTruncate(warning));
+
+            if (!collecting)
+                return;
+
+            if (warnings.size() >= FBUtilities.MAX_UNSIGNED_SHORT)
+                return;
+
+            String truncatedWarning = maybeTruncate(warning);
+
+            // If deferring, add to deferred list instead
+            if (insertionPoint >= 0)
+            {
+                if (deferredWarnings == null)
+                    synchronized (this)
+                    {
+                        if (deferredWarnings == null)
+                            deferredWarnings = new CopyOnWriteArrayList<>();
+                    }
+                deferredWarnings.add(truncatedWarning);
+            }
+            else
+            {
+                warnings.add(truncatedWarning);
+            }
         }
 
         private static String maybeTruncate(String warning)
@@ -111,6 +210,99 @@ public class ClientWarn extends ExecutorLocals.Impl
             return warning.length() > FBUtilities.MAX_UNSIGNED_SHORT
                    ? warning.substring(0, FBUtilities.MAX_UNSIGNED_SHORT - TRUNCATED.length()) + TRUNCATED
                    : warning;
+        }
+
+        /**
+         * Start deferring warnings. Records the current position in the warnings list
+         * as the insertion point for when deferred warnings are committed.
+         */
+        synchronized void startDeferring()
+        {
+            insertionPoint = warnings == null ? 0 : warnings.size();
+            deferredWarnings = null;
+            deferredActions = null;
+        }
+
+        /**
+         * Check if currently deferring warnings.
+         */
+        boolean isDeferring()
+        {
+            return insertionPoint >= 0;
+        }
+
+        /**
+         * Add a deferred action to be executed when warnings are committed.
+         */
+        void addDeferredAction(Runnable action)
+        {
+            if (insertionPoint < 0)
+            {
+                // Not deferring, execute immediately
+                action.run();
+                return;
+            }
+            if (deferredActions == null)
+                synchronized (this)
+                {
+                    if (deferredActions == null)
+                        deferredActions = new CopyOnWriteArrayList<>();
+                }
+            deferredActions.add(action);
+        }
+
+        /**
+         * Commit deferred warnings by inserting them at the recorded insertion point.
+         */
+        void commitDeferredWarnings(Consumer<Runnable> replayAction)
+        {
+            if (insertionPoint < 0)
+                return;
+
+            if (deferredWarnings != null && !deferredWarnings.isEmpty())
+            {
+                // Ensure warnings list exists
+                if (warnings == null)
+                    synchronized (this)
+                    {
+                        if (warnings == null)
+                        {
+                            warnings = new CopyOnWriteArrayList<>();
+                        }
+                    }
+
+                // Insert deferred warnings at the insertion point
+                // Note: CopyOnWriteArrayList.addAll(int, Collection) is atomic
+                int availableSpace = FBUtilities.MAX_UNSIGNED_SHORT - warnings.size();
+                if (availableSpace > 0)
+                {
+                    List<String> toInsert = deferredWarnings.size() <= availableSpace
+                                            ? deferredWarnings
+                                            : deferredWarnings.subList(0, availableSpace);
+                    warnings.addAll(Math.min(insertionPoint, warnings.size()), toInsert);
+                }
+            }
+
+            // Execute deferred actions
+            if (deferredActions != null)
+            {
+                for (Runnable action : deferredActions)
+                    replayAction.accept(action);
+            }
+
+            insertionPoint = -1;
+            deferredWarnings = null;
+            deferredActions = null;
+        }
+
+        /**
+         * Discard deferred warnings without committing them.
+         */
+        void discardDeferredWarnings()
+        {
+            insertionPoint = -1;
+            deferredWarnings = null;
+            deferredActions = null;
         }
     }
 }

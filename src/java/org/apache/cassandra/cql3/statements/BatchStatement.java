@@ -57,9 +57,9 @@ import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.IMutation;
 import org.apache.cassandra.db.ReadCommand.PotentialTxnConflicts;
 import org.apache.cassandra.db.RegularAndStaticColumns;
-import org.apache.cassandra.db.Slice;
 import org.apache.cassandra.db.Slices;
 import org.apache.cassandra.db.guardrails.Guardrails;
+import org.apache.cassandra.db.guardrails.GuardrailViolatedException;
 import org.apache.cassandra.db.partitions.PartitionUpdate;
 import org.apache.cassandra.db.rows.RowIterator;
 import org.apache.cassandra.exceptions.InvalidRequestException;
@@ -540,6 +540,17 @@ public class BatchStatement implements CQLStatement.CompositeCQLStatement
                                                    options.getNowInSeconds(state),
                                                    requestTime))
         {
+            // Commit or discard deferred warnings based on whether conditions passed
+            if (result == null)
+                ClientWarn.instance.commitDeferredWarnings();
+            else
+                ClientWarn.instance.discardDeferredWarnings();
+
+            // Check for deferred guardrail exception - if conditions passed (result is null)
+            // and we have a stored exception, throw it now (AFTER committing warnings)
+            if (result == null && casRequest.getStoredGuardrailException() != null)
+                throw GuardrailViolatedException.wrapForDeferredThrow(casRequest.getStoredGuardrailException());
+
             return new ResultMessage.Rows(ModificationStatement.buildCasResultSet(ksName,
                                                                                   tableName,
                                                                                   result,
@@ -558,6 +569,10 @@ public class BatchStatement implements CQLStatement.CompositeCQLStatement
         CQL3CasRequest casRequest = null;
         Set<ColumnMetadata> columnsWithConditions = new LinkedHashSet<>();
 
+        // Start deferring warnings during fragment creation - they will be committed
+        // or discarded based on whether conditions pass
+        ClientWarn.instance.startDeferring();
+
         for (int i = 0; i < statements.size(); i++)
         {
             ModificationStatement statement = statements.get(i);
@@ -569,7 +584,7 @@ public class BatchStatement implements CQLStatement.CompositeCQLStatement
             if (key == null)
             {
                 key = statement.metadata().partitioner.decorateKey(pks.get(0));
-                casRequest = new CQL3CasRequest(statement.metadata(), key, conditionColumns, updatesRegularRows, updatesStaticRow, requestTime);
+                casRequest = new CQL3CasRequest(statement.metadata(), key, conditionColumns, updatesRegularRows, updatesStaticRow);
             }
             else if (!key.getKey().equals(pks.get(0)))
             {
@@ -590,11 +605,19 @@ public class BatchStatement implements CQLStatement.CompositeCQLStatement
                 if (slices.isEmpty())
                     continue;
 
-                for (Slice slice : slices)
-                {
-                    casRequest.addRangeDeletion(slice, statement, statementOptions, timestamp, nowInSeconds);
-                }
+                // Skip if we're already in condition-check-only mode due to a previous guardrail failure
+                if (casRequest.isConditionCheckOnly())
+                    continue;
 
+                try
+                {
+                    casRequest.addWriteFragment(statement, statementOptions, state.getClientState(), nowInSeconds);
+                }
+                catch (GuardrailViolatedException e)
+                {
+                    // Guardrail failure - defer until conditions are checked
+                    casRequest.setStoredGuardrailException(e);
+                }
             }
             else
             {
@@ -608,7 +631,20 @@ public class BatchStatement implements CQLStatement.CompositeCQLStatement
                     else if (columnsWithConditions != null)
                         Iterables.addAll(columnsWithConditions, statement.getColumnsWithConditions());
                 }
-                casRequest.addRowUpdate(clustering, statement, statementOptions, timestamp, nowInSeconds);
+
+                // Skip if we're already in condition-check-only mode due to a previous guardrail failure
+                if (casRequest.isConditionCheckOnly())
+                    continue;
+
+                try
+                {
+                    casRequest.addWriteFragment(statement, statementOptions, state.getClientState(), nowInSeconds);
+                }
+                catch (GuardrailViolatedException e)
+                {
+                    // Guardrail failure - defer until conditions are checked
+                    casRequest.setStoredGuardrailException(e);
+                }
             }
         }
 
@@ -655,6 +691,17 @@ public class BatchStatement implements CQLStatement.CompositeCQLStatement
 
         try (RowIterator result = ModificationStatement.casInternal(state.getClientState(), request, timestamp, nowInSeconds))
         {
+            // Commit or discard deferred warnings based on whether conditions passed
+            if (result == null)
+                ClientWarn.instance.commitDeferredWarnings();
+            else
+                ClientWarn.instance.discardDeferredWarnings();
+
+            // Check for deferred guardrail exception - if conditions passed (result is null)
+            // and we have a stored exception, throw it now (AFTER committing warnings)
+            if (result == null && request.getStoredGuardrailException() != null)
+                throw GuardrailViolatedException.wrapForDeferredThrow(request.getStoredGuardrailException());
+
             ResultSet resultSet =
                 ModificationStatement.buildCasResultSet(ksName,
                                                         tableName,

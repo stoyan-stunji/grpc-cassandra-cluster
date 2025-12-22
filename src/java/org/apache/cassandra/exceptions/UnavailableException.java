@@ -17,7 +17,12 @@
  */
 package org.apache.cassandra.exceptions;
 
+import java.io.IOException;
+
 import org.apache.cassandra.db.ConsistencyLevel;
+import org.apache.cassandra.db.TypeSizes;
+import org.apache.cassandra.io.util.DataInputPlus;
+import org.apache.cassandra.io.util.DataOutputPlus;
 
 public class UnavailableException extends RequestExecutionException
 {
@@ -54,5 +59,35 @@ public class UnavailableException extends RequestExecutionException
         this.consistency = consistency;
         this.required = required;
         this.alive = alive;
+    }
+
+    @Override
+    public CassandraExceptionCode getCassandraExceptionCode()
+    {
+        return CassandraExceptionCode.UNAVAILABLE;
+    }
+
+    @Override
+    protected void serializeSpecificFields(DataOutputPlus out, int version) throws IOException
+    {
+        out.writeByte(consistency.code);
+        out.writeInt(required);
+        out.writeInt(alive);
+    }
+
+    @Override
+    protected long serializedSizeSpecificFields(int version)
+    {
+        return TypeSizes.BYTE_SIZE + // consistency
+               TypeSizes.INT_SIZE +   // required
+               TypeSizes.INT_SIZE;    // alive
+    }
+
+    static UnavailableException deserializeFields(String message, DataInputPlus in, int version) throws IOException
+    {
+        ConsistencyLevel consistency = ConsistencyLevel.fromCode(in.readUnsignedByte());
+        int required = in.readInt();
+        int alive = in.readInt();
+        return create(consistency, required, alive);
     }
 }

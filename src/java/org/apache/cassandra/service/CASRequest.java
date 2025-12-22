@@ -49,6 +49,17 @@ public interface CASRequest
     boolean appliesTo(FilteredPartition current) throws InvalidRequestException;
 
     /**
+     * Returns true if this request should only check conditions without applying updates.
+     * This is used for deferred guardrail exception handling - when a guardrail exception
+     * occurred during request preparation, we still need to check conditions first before
+     * throwing the exception.
+     */
+    default boolean isConditionCheckOnly()
+    {
+        return false;
+    }
+
+    /**
      * The updates to perform of a CAS success. The values fetched using the readFilter()
      * are passed as argument.
      */

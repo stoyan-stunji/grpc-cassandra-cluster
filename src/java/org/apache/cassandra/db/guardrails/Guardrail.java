@@ -108,15 +108,30 @@ public abstract class Guardrail
         if (skipNotifying(true))
             return;
 
-        message = decorateMessage(message);
+        String decoratedMessage = decorateMessage(message);
+        String decoratedRedactedMessage = decorateMessage(redactedMessage);
 
-        logger.warn(message);
+        // If we're deferring warnings (during CAS fragment creation), defer all warning outputs
+        if (ClientWarn.instance.isDeferring())
+        {
+            // ClientWarn will automatically capture this to the deferred list
+            ClientWarn.instance.warn(decoratedMessage);
+            // Defer logging, tracing, and diagnostics as actions to replay when committed
+            ClientWarn.instance.addDeferredAction(() -> {
+                logger.warn(decoratedMessage);
+                Tracing.trace(decoratedMessage);
+                GuardrailsDiagnostics.warned(name, decoratedRedactedMessage);
+            });
+            return;
+        }
+
+        logger.warn(decoratedMessage);
         // Note that ClientWarn will simply ignore the message if we're not running this as part of a user query
         // (the internal "state" will be null)
-        ClientWarn.instance.warn(message);
+        ClientWarn.instance.warn(decoratedMessage);
         // Similarly, tracing will also ignore the message if we're not running tracing on the current thread.
-        Tracing.trace(message);
-        GuardrailsDiagnostics.warned(name, decorateMessage(redactedMessage));
+        Tracing.trace(decoratedMessage);
+        GuardrailsDiagnostics.warned(name, decoratedRedactedMessage);
     }
 
     protected void fail(String message, @Nullable ClientState state)
@@ -126,21 +141,37 @@ public abstract class Guardrail
 
     protected void fail(String message, String redactedMessage, @Nullable ClientState state)
     {
-        message = decorateMessage(message);
+        String decoratedMessage = decorateMessage(message);
+        String decoratedRedactedMessage = decorateMessage(redactedMessage);
 
         if (!skipNotifying(false))
         {
-            logger.error(message);
-            // Note that ClientWarn will simply ignore the message if we're not running this as part of a user query
-            // (the internal "state" will be null)
-            ClientWarn.instance.warn(message);
-            // Similarly, tracing will also ignore the message if we're not running tracing on the current thread.
-            Tracing.trace(message);
-            GuardrailsDiagnostics.failed(name, decorateMessage(redactedMessage));
+            // If we're deferring warnings (during CAS fragment creation), defer all failure outputs
+            if (ClientWarn.instance.isDeferring())
+            {
+                // ClientWarn will automatically capture this to the deferred list
+                ClientWarn.instance.warn(decoratedMessage);
+                // Defer logging, tracing, and diagnostics as actions to replay when committed
+                ClientWarn.instance.addDeferredAction(() -> {
+                    logger.error(decoratedMessage);
+                    Tracing.trace(decoratedMessage);
+                    GuardrailsDiagnostics.failed(name, decoratedRedactedMessage);
+                });
+            }
+            else
+            {
+                logger.error(decoratedMessage);
+                // Note that ClientWarn will simply ignore the message if we're not running this as part of a user query
+                // (the internal "state" will be null)
+                ClientWarn.instance.warn(decoratedMessage);
+                // Similarly, tracing will also ignore the message if we're not running tracing on the current thread.
+                Tracing.trace(decoratedMessage);
+                GuardrailsDiagnostics.failed(name, decoratedRedactedMessage);
+            }
         }
 
         if (state != null || throwOnNullClientState)
-            throw new GuardrailViolatedException(message);
+            throw new GuardrailViolatedException(decoratedMessage);
     }
 
     @VisibleForTesting

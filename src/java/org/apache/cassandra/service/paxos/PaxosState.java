@@ -189,8 +189,8 @@ public class PaxosState implements PaxosOperationLock
         public Snapshot(@Nonnull Ballot promised, @Nonnull Ballot promisedWrite, @Nullable Accepted accepted, @Nonnull Committed committed)
         {
             assert isAfter(promised, promisedWrite) || promised == promisedWrite;
-            assert accepted == null || accepted.update.partitionKey().equals(committed.update.partitionKey());
-            assert accepted == null || accepted.update.metadata().id.equals(committed.update.metadata().id);
+            assert accepted == null || accepted.partitionKey().equals(committed.partitionKey());
+            assert accepted == null || accepted.metadata().id.equals(committed.metadata().id);
             assert accepted == null || committed.isBefore(accepted.ballot);
 
             this.promised = promised;
@@ -222,7 +222,7 @@ public class PaxosState implements PaxosOperationLock
         {
             // warn: if proposal has same timestamp as promised, we should prefer accepted
             // since (if different) it reached a quorum of promises; this means providing it as first argument
-            Ballot latest = accepted != null && !accepted.update.isEmpty() ? accepted.ballot : null;
+            Ballot latest = accepted != null && !accepted.isEmpty() ? accepted.ballot : null;
             latest = latest(latest, committed.ballot);
             latest = latest(latest, promisedWrite);
             latest = latest(latest, ballotTracker().getLowBound());
@@ -270,7 +270,7 @@ public class PaxosState implements PaxosOperationLock
 
             if (paxosStatePurging() == gc_grace)
             {
-                long expireOlderThan = SECONDS.toMicros(nowInSec - committed.update.metadata().params.gcGraceSeconds);
+                long expireOlderThan = SECONDS.toMicros(nowInSec - committed.metadata().params.gcGraceSeconds);
                 isAcceptedExpired |= accepted != null && accepted.ballot.unixMicros() < expireOlderThan;
                 isCommittedExpired |= committed.ballot.unixMicros() < expireOlderThan;
             }
@@ -281,7 +281,7 @@ public class PaxosState implements PaxosOperationLock
             return new Snapshot(promised, promisedWrite,
                                 isAcceptedExpired ? null : accepted,
                                 isCommittedExpired
-                                    ? Committed.none(committed.update.partitionKey(), committed.update.metadata())
+                                    ? Committed.none(committed.partitionKey(), committed.metadata())
                                     : committed);
         }
     }
@@ -296,7 +296,7 @@ public class PaxosState implements PaxosOperationLock
 
         public UnsafeSnapshot(@Nonnull Commit committed)
         {
-            this(new Committed(committed.ballot, committed.update));
+            this(new Committed(committed.ballot, committed.mutation));
         }
     }
 
@@ -363,7 +363,7 @@ public class PaxosState implements PaxosOperationLock
     @VisibleForTesting
     public static PaxosState get(Commit commit)
     {
-        return get(commit.update.partitionKey(), commit.update.metadata());
+        return get(commit.partitionKey(), commit.metadata());
     }
 
     public static PaxosState get(DecoratedKey partitionKey, TableMetadata table)
@@ -404,7 +404,7 @@ public class PaxosState implements PaxosOperationLock
 
     private static PaxosState getUnsafe(Commit commit)
     {
-        return getUnsafe(commit.update.partitionKey(), commit.update.metadata());
+        return getUnsafe(commit.partitionKey(), commit.metadata());
     }
 
     // don't increment the total count, as we are only using this for locking purposes when coordinating
@@ -694,7 +694,7 @@ public class PaxosState implements PaxosOperationLock
     public static void commitDirect(Commit commit)
     {
         applyCommit(commit, null, (apply, ignore) -> {
-            try (PaxosState state = tryGetUnsafe(apply.update.partitionKey(), apply.update.metadata()))
+            try (PaxosState state = tryGetUnsafe(apply.partitionKey(), apply.metadata()))
             {
                 if (state != null)
                     currentUpdater.accumulateAndGet(state, new UnsafeSnapshot(apply), Snapshot::merge);
@@ -713,7 +713,7 @@ public class PaxosState implements PaxosOperationLock
             // TODO: run Paxos Repair before truncate so we can excise this
             // The table may have been truncated since the proposal was initiated. In that case, we
             // don't want to perform the mutation and potentially resurrect truncated data
-            if (commit.ballot.unixMicros() >= SystemKeyspace.getTruncatedAt(commit.update.metadata().id))
+            if (commit.ballot.unixMicros() >= SystemKeyspace.getTruncatedAt(commit.metadata().id))
             {
                 Tracing.trace("Committing proposal {}", commit);
                 Mutation mutation = commit.makeMutation();
@@ -735,7 +735,7 @@ public class PaxosState implements PaxosOperationLock
         }
         finally
         {
-            Keyspace.openAndGetStore(commit.update.metadata()).metric.casCommit.addNano(nanoTime() - start);
+            Keyspace.openAndGetStore(commit.metadata()).metric.casCommit.addNano(nanoTime() - start);
         }
     }
 
@@ -762,8 +762,8 @@ public class PaxosState implements PaxosOperationLock
                         if (currentUpdater.compareAndSet(unsafeState, realBefore, after))
                         {
                             Tracing.trace("Promising ballot {}", toPrepare.ballot);
-                            DecoratedKey partitionKey = toPrepare.update.partitionKey();
-                            TableMetadata metadata = toPrepare.update.metadata();
+                            DecoratedKey partitionKey = toPrepare.partitionKey();
+                            TableMetadata metadata = toPrepare.metadata();
                             SystemKeyspace.savePaxosWritePromise(partitionKey, metadata, toPrepare.ballot);
                             return new PrepareResponse(true, before.accepted == null ? Accepted.none(partitionKey, metadata) : before.accepted, before.committed);
                         }
@@ -772,14 +772,14 @@ public class PaxosState implements PaxosOperationLock
                     {
                         Tracing.trace("Promise rejected; {} is not sufficiently newer than {}", toPrepare, before.promised);
                         // return the currently promised ballot (not the last accepted one) so the coordinator can make sure it uses newer ballot next time (#5667)
-                        return new PrepareResponse(false, new Commit(before.promised, toPrepare.update), before.committed);
+                        return new PrepareResponse(false, Commit.create(before.promised, toPrepare.mutation), before.committed);
                     }
                 }
             }
         }
         finally
         {
-            Keyspace.openAndGetStore(toPrepare.update.metadata()).metric.casPrepare.addNano(nanoTime() - start);
+            Keyspace.openAndGetStore(toPrepare.metadata()).metric.casPrepare.addNano(nanoTime() - start);
         }
     }
 
@@ -825,7 +825,7 @@ public class PaxosState implements PaxosOperationLock
         }
         finally
         {
-            Keyspace.openAndGetStore(proposal.update.metadata()).metric.casPropose.addNano(nanoTime() - start);
+            Keyspace.openAndGetStore(proposal.metadata()).metric.casPropose.addNano(nanoTime() - start);
         }
     }
 

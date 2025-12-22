@@ -18,12 +18,42 @@
 
 package org.apache.cassandra.db.guardrails;
 
+import org.apache.cassandra.exceptions.CassandraExceptionCode;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 
 public class GuardrailViolatedException extends InvalidRequestException
 {
-    GuardrailViolatedException(String message)
+    public GuardrailViolatedException(String message)
     {
         super(message);
+    }
+
+    protected GuardrailViolatedException(String message, Throwable cause)
+    {
+        super(message, cause);
+    }
+
+    @Override
+    public CassandraExceptionCode getCassandraExceptionCode()
+    {
+        return CassandraExceptionCode.GUARDRAIL_VIOLATED;
+    }
+
+    /**
+     * Wraps a guardrail exception for deferred throwing, preserving the exception type.
+     * This is used when a guardrail exception is caught during CAS request preparation
+     * but needs to be thrown later after conditions are checked.
+     *
+     * @param original the original exception that was deferred
+     * @return a new exception of the same type with the original as the cause
+     */
+    public static GuardrailViolatedException wrapForDeferredThrow(GuardrailViolatedException original)
+    {
+        if (original instanceof PasswordGuardrail.PasswordGuardrailException)
+        {
+            PasswordGuardrail.PasswordGuardrailException pge = (PasswordGuardrail.PasswordGuardrailException) original;
+            return new PasswordGuardrail.PasswordGuardrailException(pge.getMessage(), pge.redactedMessage, original);
+        }
+        return new GuardrailViolatedException(original.getMessage(), original);
     }
 }

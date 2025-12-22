@@ -17,11 +17,16 @@
  */
 package org.apache.cassandra.exceptions;
 
+import java.io.IOException;
+import java.util.HashMap;
 import java.util.Map;
 
 import com.google.common.collect.ImmutableMap;
 
 import org.apache.cassandra.db.ConsistencyLevel;
+import org.apache.cassandra.db.TypeSizes;
+import org.apache.cassandra.io.util.DataInputPlus;
+import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.locator.InetAddressAndPort;
 
 public class ReadFailureException extends RequestFailureException
@@ -50,5 +55,99 @@ public class ReadFailureException extends RequestFailureException
     {
         super(ExceptionCode.READ_FAILURE, rfe.getMessage(), rfe.consistency, rfe.received, rfe.blockFor, rfe.failureReasonByEndpoint, rfe);
         this.dataPresent = rfe.dataPresent;
+    }
+
+    @Override
+    protected void serializeSpecificFields(DataOutputPlus out, int version) throws IOException
+    {
+        out.writeByte(consistency.code);
+        out.writeInt(received);
+        out.writeInt(blockFor);
+
+        // Serialize failure reason map
+        out.writeInt(failureReasonByEndpoint.size());
+        for (Map.Entry<InetAddressAndPort, RequestFailureReason> entry : failureReasonByEndpoint.entrySet())
+        {
+            InetAddressAndPort.Serializer.inetAddressAndPortSerializer.serialize(entry.getKey(), out, version);
+            out.writeShort(entry.getValue().code);
+        }
+
+        out.writeBoolean(dataPresent);
+    }
+
+    @Override
+    protected long serializedSizeSpecificFields(int version)
+    {
+        long size = TypeSizes.BYTE_SIZE + // consistency
+                    TypeSizes.INT_SIZE +   // received
+                    TypeSizes.INT_SIZE +   // blockFor
+                    TypeSizes.INT_SIZE;    // map size
+
+        for (Map.Entry<InetAddressAndPort, RequestFailureReason> entry : failureReasonByEndpoint.entrySet())
+        {
+            size += InetAddressAndPort.Serializer.inetAddressAndPortSerializer.serializedSize(entry.getKey(), version);
+            size += TypeSizes.SHORT_SIZE; // reason code
+        }
+
+        size += TypeSizes.BOOL_SIZE; // dataPresent
+        return size;
+    }
+
+    static ReadFailureException deserializeFields(String message, DataInputPlus in, int version) throws IOException
+    {
+        DeserializedFields fields = deserializeBaseFields(in, version);
+        return new ReadFailureException(message, fields.consistency, fields.received, fields.blockFor, fields.dataPresent, fields.failures);
+    }
+
+    /**
+     * Helper class to hold deserialized base fields for subclasses to use.
+     */
+    static class DeserializedFields
+    {
+        final ConsistencyLevel consistency;
+        final int received;
+        final int blockFor;
+        final Map<InetAddressAndPort, RequestFailureReason> failures;
+        final boolean dataPresent;
+
+        DeserializedFields(ConsistencyLevel consistency, int received, int blockFor,
+                          Map<InetAddressAndPort, RequestFailureReason> failures, boolean dataPresent)
+        {
+            this.consistency = consistency;
+            this.received = received;
+            this.blockFor = blockFor;
+            this.failures = failures;
+            this.dataPresent = dataPresent;
+        }
+    }
+
+    /**
+     * Deserialize the base fields common to ReadFailureException and its subclasses.
+     * Subclasses should call this method and then read any additional fields.
+     */
+    static DeserializedFields deserializeBaseFields(DataInputPlus in, int version) throws IOException
+    {
+        ConsistencyLevel consistency = ConsistencyLevel.fromCode(in.readUnsignedByte());
+        int received = in.readInt();
+        int blockFor = in.readInt();
+
+        // Deserialize failure reason map
+        int mapSize = in.readInt();
+        Map<InetAddressAndPort, RequestFailureReason> failures = new HashMap<>(mapSize);
+        for (int i = 0; i < mapSize; i++)
+        {
+            InetAddressAndPort endpoint = InetAddressAndPort.Serializer.inetAddressAndPortSerializer.deserialize(in, version);
+            RequestFailureReason reason = RequestFailureReason.fromCode(in.readShort());
+            failures.put(endpoint, reason);
+        }
+
+        boolean dataPresent = in.readBoolean();
+        return new DeserializedFields(consistency, received, blockFor, failures, dataPresent);
+    }
+
+    @Override
+    public CassandraExceptionCode getCassandraExceptionCode()
+    {
+        return CassandraExceptionCode.READ_FAILURE;
     }
 }

@@ -27,11 +27,15 @@ import javax.annotation.Nullable;
 
 import com.google.common.base.Objects;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.Mutation;
 import org.apache.cassandra.db.ReadCommand.PotentialTxnConflicts;
 import org.apache.cassandra.db.partitions.PartitionUpdate;
 import org.apache.cassandra.db.rows.DeserializationHelper;
+import org.apache.cassandra.db.rows.EncodingStats;
 import org.apache.cassandra.io.IVersionedSerializer;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
@@ -48,17 +52,24 @@ import static org.apache.cassandra.utils.FBUtilities.nowInSeconds;
 
 public class Commit
 {
+    private static final Logger logger = LoggerFactory.getLogger(Commit.class);
+
     enum CompareResult { SAME, BEFORE, AFTER, IS_REPROPOSAL, WAS_REPROPOSED_BY}
 
-    public static final CommitSerializer<Commit> serializer = new CommitSerializer<>(Commit::new);
+    public static final CommitSerializer<Commit> serializer = new CommitSerializer<>(Commit::new, Commit::new);
 
     public static class Proposal extends Commit
     {
-        public static final CommitSerializer<Proposal> serializer = new CommitSerializer<>(Proposal::new);
+        public static final CommitSerializer<Proposal> serializer = new CommitSerializer<>(Proposal::new, Proposal::new);
 
         public Proposal(Ballot ballot, PartitionUpdate update)
         {
             super(ballot, update);
+        }
+
+        public Proposal(Ballot ballot, Mutation mutation)
+        {
+            super(ballot, mutation);
         }
 
         public String toString()
@@ -79,18 +90,18 @@ public class Commit
 
         public Accepted accepted()
         {
-            return new Accepted(ballot, update);
+            return new Accepted(ballot, mutation);
         }
 
         public Agreed agreed()
         {
-            return new Agreed(ballot, update);
+            return new Agreed(ballot, mutation);
         }
     }
 
     public static class Accepted extends Proposal
     {
-        public static final CommitSerializer<Accepted> serializer = new CommitSerializer<>(Accepted::new);
+        public static final CommitSerializer<Accepted> serializer = new CommitSerializer<>(Accepted::new, Accepted::new);
 
         public static Accepted none(DecoratedKey partitionKey, TableMetadata metadata)
         {
@@ -102,14 +113,19 @@ public class Commit
             super(ballot, update);
         }
 
+        public Accepted(Ballot ballot, Mutation mutation)
+        {
+            super(ballot, mutation);
+        }
+
         public Accepted(Commit commit)
         {
-            super(commit.ballot, commit.update);
+            super(commit.ballot, commit.mutation);
         }
 
         Committed committed()
         {
-            return new Committed(ballot, update);
+            return new Committed(ballot, mutation);
         }
 
         boolean isExpired(long nowInSec)
@@ -138,7 +154,7 @@ public class Commit
     {
         public static AcceptedWithTTL withDefaultTTL(Commit copy)
         {
-            return new AcceptedWithTTL(copy, nowInSeconds() + legacyPaxosTtlSec(copy.update.metadata()));
+            return new AcceptedWithTTL(copy, nowInSeconds() + legacyPaxosTtlSec(copy.metadata()));
         }
 
         public final long localDeletionTime;
@@ -170,11 +186,16 @@ public class Commit
     // might prefer to call this Commit, but would mean refactoring more legacy code
     public static class Agreed extends Accepted
     {
-        public static final CommitSerializer<Agreed> serializer = new CommitSerializer<>(Agreed::new);
+        public static final CommitSerializer<Agreed> serializer = new CommitSerializer<>(Agreed::new, Agreed::new);
 
         public Agreed(Ballot ballot, PartitionUpdate update)
         {
             super(ballot, update);
+        }
+
+        public Agreed(Ballot ballot, Mutation mutation)
+        {
+            super(ballot, mutation);
         }
 
         public Agreed(Commit copy)
@@ -185,7 +206,7 @@ public class Commit
 
     public static class Committed extends Agreed
     {
-        public static final CommitSerializer<Committed> serializer = new CommitSerializer<>(Committed::new);
+        public static final CommitSerializer<Committed> serializer = new CommitSerializer<>(Committed::new, Committed::new);
 
         public static Committed none(DecoratedKey partitionKey, TableMetadata metadata)
         {
@@ -195,6 +216,11 @@ public class Commit
         public Committed(Ballot ballot, PartitionUpdate update)
         {
             super(ballot, update);
+        }
+
+        public Committed(Ballot ballot, Mutation mutation)
+        {
+            super(ballot, mutation);
         }
 
         public Committed(Commit copy)
@@ -225,7 +251,7 @@ public class Commit
     {
         public static CommittedWithTTL withDefaultTTL(Commit copy)
         {
-            return new CommittedWithTTL(copy, nowInSeconds() + legacyPaxosTtlSec(copy.update.metadata()));
+            return new CommittedWithTTL(copy, nowInSeconds() + legacyPaxosTtlSec(copy.metadata()));
         }
 
         public final long localDeletionTime;
@@ -254,16 +280,52 @@ public class Commit
         }
     }
 
+    public interface Commitable
+    {
+        enum CommitableKind
+        {
+            PARTITION_UPDATE, MUTATION;
+        }
+
+        CommitableKind commitableKind();
+    }
+
     public final Ballot ballot;
+    public final Mutation mutation;
     public final PartitionUpdate update;
 
-    public Commit(Ballot ballot, PartitionUpdate update)
+    public static Commit create(Ballot ballot, Commitable commitable)
+    {
+        switch (commitable.commitableKind())
+        {
+            case MUTATION:
+                return new Commit(ballot, (Mutation)commitable);
+            case PARTITION_UPDATE:
+                return new Commit(ballot, (PartitionUpdate) commitable);
+            default:
+                throw new AssertionError("Unexpected commitableKind: " + commitable.commitableKind());
+        }
+    }
+
+    private Commit(Ballot ballot, PartitionUpdate update)
     {
         assert ballot != null;
         assert update != null;
 
         this.ballot = ballot;
+        this.mutation = new Mutation(MutationId.none(), update, PotentialTxnConflicts.ALLOW);
         this.update = update;
+    }
+
+    private Commit(Ballot ballot, Mutation mutation)
+    {
+        assert ballot != null;
+        assert mutation != null;
+        assert mutation.getPartitionUpdates().size() == 1 : "Paxos commits should only have one partition update";
+
+        this.ballot = ballot;
+        this.mutation = mutation;
+        this.update = mutation.getOnlyUpdate();
     }
 
     public static Commit newPrepare(DecoratedKey partitionKey, TableMetadata metadata, Ballot ballot)
@@ -316,15 +378,36 @@ public class Commit
 
     public Mutation makeMutation()
     {
-        // TODO (expected): what's the best thing to do here? Deriving the mutation id from the ballot seems like the best
-        //   thing to do, like we do with the partition update timestamps, but there are caveats related to id collisions
-        //   and the assumption that a mutation id is unique amonth other mutations, which is not the case w/ paxos ballots,
-        //   which only need to be unique to a given partition key to be accepted. It may be best to keep them separate anyway,
-        //   since the reconciliation process as currently planned will not allow writes with ids before some point in time,
-        //   and there might be edge cases where that locks up paxos execution or has other side effects. The downside of
-        //   not making paxos mutation ids deterministic is that the same commit may create multiple mutation ids if a paxos
-        //   operation is not fully committed, then re-committed on repair or the next operation
-        return new Mutation(MutationId.fixme(), update, PotentialTxnConflicts.ALLOW);
+        return mutation;
+    }
+
+    public Mutation makeMutation(MutationId mutationId)
+    {
+        if (mutationId == null || mutation.id().equals(mutationId))
+            return mutation;
+        
+        PartitionUpdate update = mutation.getOnlyUpdate();
+        return new Mutation(mutationId, update, mutation.potentialTxnConflicts());
+    }
+
+    public DecoratedKey partitionKey()
+    {
+        return update.partitionKey();
+    }
+
+    public TableMetadata metadata()
+    {
+        return update.metadata();
+    }
+
+    public EncodingStats stats()
+    {
+        return update.stats();
+    }
+
+    public boolean isEmpty()
+    {
+        return mutation.getOnlyUpdate().isEmpty();
     }
 
     @Override
@@ -376,7 +459,7 @@ public class Commit
 
         // the timestamp of a mutation stays unchanged as we repropose it, so the timestamp of the mutation
         // is the timestamp of the ballot that originally proposed it
-        long originalBallotOfNewer = newer.update.stats().minTimestamp;
+        long originalBallotOfNewer = newer.stats().minTimestamp;
 
         // so, if the mutation and ballot timestamps match, this is not a reproposal but a first proposal
         if (ballotOfNewer == originalBallotOfNewer)
@@ -387,7 +470,7 @@ public class Commit
             return true;
 
         // otherwise, it could be that both are reproposals, so just check both for the "original" ballot timestamp
-        return originalBallotOfNewer == older.update.stats().minTimestamp;
+        return originalBallotOfNewer == older.stats().minTimestamp;
     }
 
     public CompareResult compareWith(Commit that)
@@ -487,29 +570,64 @@ public class Commit
 
     public static class CommitSerializer<T extends Commit> implements IVersionedSerializer<T>
     {
-        final BiFunction<Ballot, PartitionUpdate, T> constructor;
-        public CommitSerializer(BiFunction<Ballot, PartitionUpdate, T> constructor)
+        final BiFunction<Ballot, PartitionUpdate, T> partitionUpdateConstructor;
+        final BiFunction<Ballot, Mutation, T> mutationConstructor;
+
+        public CommitSerializer(BiFunction<Ballot, PartitionUpdate, T> partitionUpdateConstructor, BiFunction<Ballot, Mutation, T> mutationConstructor)
         {
-            this.constructor = constructor;
+            this.partitionUpdateConstructor = partitionUpdateConstructor;
+            this.mutationConstructor = mutationConstructor;
         }
 
         public void serialize(T commit, DataOutputPlus out, int version) throws IOException
         {
             commit.ballot.serialize(out);
-            PartitionUpdate.serializer.serialize(commit.update, out, version);
+            
+            // Use version-aware serialization
+            if (version >= org.apache.cassandra.net.MessagingService.VERSION_52)
+            {
+                // New format: serialize Mutation directly
+                org.apache.cassandra.db.Mutation.serializer.serialize(commit.mutation, out, version);
+            }
+            else
+            {
+                // Legacy format: serialize PartitionUpdate
+                PartitionUpdate.serializer.serialize(commit.update, out, version);
+            }
         }
 
         public T deserialize(DataInputPlus in, int version) throws IOException
         {
             Ballot ballot = Ballot.deserialize(in);
-            PartitionUpdate update = PartitionUpdate.serializer.deserialize(in, version, DeserializationHelper.Flag.LOCAL);
-            return constructor.apply(ballot, update);
+            
+            if (version >= org.apache.cassandra.net.MessagingService.VERSION_52)
+            {
+                // New format: deserialize Mutation
+                org.apache.cassandra.db.Mutation mutation = org.apache.cassandra.db.Mutation.serializer.deserialize(in, version);
+                return mutationConstructor.apply(ballot, mutation);
+            }
+            else
+            {
+                // Legacy format: always PartitionUpdate
+                PartitionUpdate update = PartitionUpdate.serializer.deserialize(in, version, DeserializationHelper.Flag.LOCAL);
+                return partitionUpdateConstructor.apply(ballot, update);
+            }
         }
 
         public long serializedSize(T commit, int version)
         {
-            return Ballot.sizeInBytes()
-                   + PartitionUpdate.serializer.serializedSize(commit.update, version);
+            long size = Ballot.sizeInBytes();
+            
+            if (version >= org.apache.cassandra.net.MessagingService.VERSION_52)
+            {
+                size += org.apache.cassandra.db.Mutation.serializer.serializedSize(commit.mutation, version);
+            }
+            else
+            {
+                size += PartitionUpdate.serializer.serializedSize(commit.update, version);
+            }
+            
+            return size;
         }
     }
 
