@@ -71,7 +71,7 @@ public class CompactionTaskTest
         cfs.truncateBlocking();
     }
 
-    @Test
+@Test
     public void testTaskIdIsPersistedInCompactionHistory()
     {
         QueryProcessor.executeInternal("INSERT INTO ks.tbl (k, v) VALUES (1, 1);");
@@ -92,7 +92,7 @@ public class CompactionTaskTest
             task.execute(CompactionManager.instance.active);
         }
 
-        UntypedResultSet rows = QueryProcessor.executeInternal(format("SELECT id FROM system.%s where id = %s",
+        UntypedResultSet rows = QueryProcessor.executeInternal(format("SELECT id, compaction_type, compaction_properties FROM system.%s where id = %s",
                                                                       SystemKeyspace.COMPACTION_HISTORY,
                                                                       id.toString()));
 
@@ -103,6 +103,12 @@ public class CompactionTaskTest
         TimeUUID persistedId = one.getTimeUUID("id");
 
         Assert.assertEquals(id, persistedId);
+
+        String type = one.getString("compaction_type");
+        Assert.assertEquals("Compaction", type);
+
+        java.util.Map<String, String> properties = one.getMap("compaction_properties", org.apache.cassandra.db.marshal.UTF8Type.instance, org.apache.cassandra.db.marshal.UTF8Type.instance);
+        Assert.assertTrue("Strategy missing in properties", properties.containsKey("strategy"));
     }
 
     @Test

@@ -158,6 +158,34 @@ public class SystemKeyspaceTest
         assertEquals(DatabaseDescriptor.getStoragePort(), row.getInt("listen_port"));
     }
 
+    @Test
+    public void testCompactionHistory()
+    {
+        String ks = "test_ks";
+        String cf = "test_cf";
+        long now = System.currentTimeMillis();
+        Map<Integer, Long> rowsMerged = Collections.singletonMap(1, 100L);
+        Map<String, String> props = Collections.singletonMap("strategy", "STCS");
+        String compactionType = "TestMajor";
+
+        SystemKeyspace.updateCompactionHistory(
+            org.apache.cassandra.utils.TimeUUID.Generator.nextTimeUUID(),
+            ks,
+            cf,
+            now,
+            1000,
+            500,
+            rowsMerged,
+            props,
+            compactionType
+        );
+
+        UntypedResultSet result = executeInternal("SELECT compaction_type FROM system.compaction_history WHERE keyspace_name=? AND columnfamily_name=? ALLOW FILTERING", ks, cf);
+
+        assertNotNull(result);
+        assertEquals(compactionType, result.one().getString("compaction_type"));
+    }
+
     private String getOlderVersionString()
     {
         String version = FBUtilities.getReleaseVersionString();
