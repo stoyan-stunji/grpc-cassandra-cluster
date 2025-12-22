@@ -324,8 +324,8 @@ compression_dictionary_training_sampling_rate: 0.01
 
 These parameters are meant to be configured via CQL for each respective table if defaults are not appropriate.
 
-* `training_max_total_sample_size` (default: `10MiB`): Maximum total size of sample data to collect for training, approximately 10MB. This is a parameter of `ZstdDictionaryCompressor`
-of a table, in `compression` section.
+* `training_max_total_sample_size` (default: `10MiB`): Maximum total size of sample data to collect for training, approximately 10MB. This parameter is configured in the 
+table's compression options for `ZstdDictionaryCompressor`.
 * `training_max_dictionary_size` (default: `64KiB`): Maximum size of trained dictionaries in bytes. Larger dictionaries can  capture more patterns but increase memory overhead. This is a parameter of `ZstdDictionaryCompressor` of a table, in `compression` section.
 
 Example:
