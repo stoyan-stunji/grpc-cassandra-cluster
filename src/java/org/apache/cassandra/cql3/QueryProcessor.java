@@ -649,7 +649,7 @@ public class QueryProcessor implements QueryHandler
                 return createResultMessage(hashWithKeyspace, cachedWithKeyspace);
             }
         }
-        else
+        else if (cachedWithoutKeyspace != null || cachedWithKeyspace != null)
         {
             // Make sure the missing one is going to be eventually re-prepared
             evictPrepared(hashWithKeyspace);
