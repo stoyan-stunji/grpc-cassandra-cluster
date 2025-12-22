@@ -33,10 +33,10 @@ public class CompactionHistory extends AbstractCommand
             description = "Output format (json, yaml)")
     private String outputFormat = "";
 
-    @Option(paramLabel = "human_readable",
-            names = { "-H", "--human-readable" },
-            description = "Display bytes in human readable form, i.e. KiB, MiB, GiB, TiB")
-    private boolean humanReadable = false;
+    @Option(paramLabel = "no_human_readable",
+            names = { "-n", "--no-human-readable" },
+            description = "Display raw bytes (disable default human readable format)")
+    private boolean noHumanReadable = false;
 
     @Override
     public void execute(NodeProbe probe)
@@ -45,7 +45,7 @@ public class CompactionHistory extends AbstractCommand
         {
             throw new IllegalArgumentException("arguments for -F are json,yaml only.");
         }
-        StatsHolder data = new CompactionHistoryHolder(probe, humanReadable);
+        StatsHolder data = new CompactionHistoryHolder(probe, !noHumanReadable);
         StatsPrinter printer = CompactionHistoryPrinter.from(outputFormat);
         printer.print(data, probe.output().out);
     }
