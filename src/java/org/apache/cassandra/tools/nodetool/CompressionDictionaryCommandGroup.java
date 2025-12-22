@@ -102,7 +102,7 @@ public class CompressionDictionaryCommandGroup
                 out.printf("Training from existing SSTables (flushing first if needed)%n");
 
                 Map<String, String> parameters = new HashMap<>();
-                if (trainingMaxTotalSampleSize != null)
+                if (trainingMaxDictionarySize != null)
                     parameters.put(TRAINING_MAX_DICTIONARY_SIZE_PARAMETER_NAME, trainingMaxDictionarySize);
 
                 if (trainingMaxTotalSampleSize != null)

@@ -63,7 +63,7 @@ public class ZstdDictionaryTrainer implements ICompressionDictionaryTrainer
 
     private volatile Consumer<CompressionDictionary> dictionaryTrainedListener;
     // TODO: manage the samples in this class for auto-train (follow-up). The ZstdDictTrainer cannot be re-used for multiple training runs.
-    private ZstdDictTrainer zstdTrainer;
+    private volatile ZstdDictTrainer zstdTrainer;
     private volatile boolean closed = false;
     private volatile TrainingStatus currentTrainingStatus;
     private volatile String failureMessage;
@@ -233,6 +233,12 @@ public class ZstdDictionaryTrainer implements ICompressionDictionaryTrainer
             return message.toString();
         }
 
+        if (config == null)
+        {
+            message.append(": configuration not initialized (call start() first)");
+            return message.toString();
+        }
+
         long currentSampleCount = sampleCount.get();
         long currentTotalSampleSize = totalSampleSize.get();
 
@@ -306,7 +312,6 @@ public class ZstdDictionaryTrainer implements ICompressionDictionaryTrainer
         {
             // reset on starting; a new zstdTrainer instance is created during reset
             reset(trainingConfig);
-            config = trainingConfig;
             logger.info("Started dictionary training for {}.{}", keyspaceName, tableName);
             currentTrainingStatus = TrainingStatus.SAMPLING;
             failureMessage = null; // Clear any previous failure message
@@ -343,7 +348,7 @@ public class ZstdDictionaryTrainer implements ICompressionDictionaryTrainer
             totalSampleSize.set(0);
             sampleCount.set(0);
             zstdTrainer = new ZstdDictTrainer(trainingConfig.maxTotalSampleSize, trainingConfig.maxDictionarySize, compressionLevel);
-            config = null;
+            config = trainingConfig;
         }
     }
 
