@@ -31,6 +31,7 @@ import org.apache.cassandra.config.Config;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ClusteringComparator;
 import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.RegularAndStaticColumns;
 import org.apache.cassandra.db.commitlog.CommitLogPosition;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.schema.TableMetadataRef;
@@ -74,6 +75,8 @@ public abstract class AbstractAllocatorMemtable extends AbstractMemtableWithComm
     public final Factory initialFactory;
 
     private final long creationNano = Clock.Global.nanoTime();
+
+    protected final RegularAndStaticColumns columnsOnCreation;
 
     @VisibleForTesting
     static MemtablePool createMemtableAllocatorPool()
@@ -120,6 +123,7 @@ public abstract class AbstractAllocatorMemtable extends AbstractMemtableWithComm
         this.initialComparator = metadata.get().comparator;
         this.initialFactory = metadata().params.memtable.factory();
         this.owner = owner;
+        this.columnsOnCreation = metadata().regularAndStaticColumns();
         scheduleFlush();
     }
 

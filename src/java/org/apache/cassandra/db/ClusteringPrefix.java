@@ -258,6 +258,23 @@ public interface ClusteringPrefix<V> extends IMeasurableMemory, Clusterable<V>
      */
     public V get(int i);
 
+
+    default void writeValue(AbstractType<?> type, int i, DataOutputPlus out) throws IOException
+    {
+        V v = get(i);
+        if (v != null && !isEmpty(i))
+            type.writeValue(v, accessor(), out);
+    }
+
+    default long writtenLength(AbstractType<?> type, int i)
+    {
+        V v = get(i);
+        if (v == null || isEmpty(i))
+            return 0;
+
+        return type.writtenLength(v, accessor());
+    }
+
     /**
      * The method is introduced to allow to avoid a value object retrieval/allocation for simple checks
      */
@@ -476,7 +493,6 @@ public interface ClusteringPrefix<V> extends IMeasurableMemory, Clusterable<V>
         {
             int offset = 0;
             int clusteringSize = clustering.size();
-            ValueAccessor<V> accessor = clustering.accessor();
             // serialize in batches of 32, to avoid garbage when deserializing headers
             while (offset < clusteringSize)
             {
@@ -488,9 +504,7 @@ public interface ClusteringPrefix<V> extends IMeasurableMemory, Clusterable<V>
                 out.writeUnsignedVInt(makeHeader(clustering, offset, limit));
                 while (offset < limit)
                 {
-                    V v = clustering.get(offset);
-                    if (v != null && !accessor.isEmpty(v))
-                        types.get(offset).writeValue(v, accessor, out);
+                    clustering.writeValue(types.get(offset), offset, out);
                     offset++;
                 }
             }
@@ -507,14 +521,9 @@ public interface ClusteringPrefix<V> extends IMeasurableMemory, Clusterable<V>
                 result += TypeSizes.sizeofUnsignedVInt(makeHeader(clustering, offset, limit));
                 offset = limit;
             }
-            ValueAccessor<V> accessor = clustering.accessor();
             for (int i = 0; i < clusteringSize; i++)
             {
-                V v = clustering.get(i);
-                if (v == null || accessor.isEmpty(v))
-                    continue; // handled in the header
-
-                result += types.get(i).writtenLength(v, accessor);
+                result += clustering.writtenLength(types.get(i), i);
             }
             return result;
         }

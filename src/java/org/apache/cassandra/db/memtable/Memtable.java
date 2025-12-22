@@ -226,6 +226,11 @@ public interface Memtable extends Comparable<Memtable>, UnfilteredSource
      */
     TableMetadata metadata();
 
+    default boolean columnsChangedAfterCreation()
+    {
+        return true;
+    }
+
 
     // Memory usage tracking
 
@@ -335,6 +340,11 @@ public interface Memtable extends Comparable<Memtable>, UnfilteredSource
         default TableMetadata metadata()
         {
             return memtable().metadata();
+        }
+
+        default boolean columnsChangedAfterCreation()
+        {
+            return true;
         }
 
         default boolean isEmpty()

@@ -488,6 +488,13 @@ public class TrieMemtable extends AbstractShardedMemtable
             {
                 return tableMetadata;
             }
+
+
+            @Override
+            public boolean columnsChangedAfterCreation()
+            {
+                return !TrieMemtable.this.columnsOnCreation.equals(tableMetadata.regularAndStaticColumns());
+            }
         };
     }
 

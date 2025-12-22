@@ -171,6 +171,12 @@ public abstract class AbstractBTreePartition implements Partition, Iterable<Row>
         return unfilteredIterator(ColumnFilter.selection(columns()), Slices.ALL, false);
     }
 
+    public UnfilteredRowIterator flushingIterator(TableMetadata tableMetadata)
+    {
+        return unfilteredIterator(ColumnFilter.all(columns()), Slices.ALL, false);
+    }
+
+
     public UnfilteredRowIterator unfilteredIterator(ColumnFilter selection, Slices slices, boolean reversed)
     {
         return unfilteredIterator(holder(), selection, slices, reversed);

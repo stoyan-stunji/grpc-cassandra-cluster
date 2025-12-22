@@ -18,7 +18,9 @@
 
 package org.apache.cassandra.db.rows;
 
+import org.apache.cassandra.db.LivenessInfo;
 import org.apache.cassandra.db.SerializationHeader;
+import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.utils.SearchIterator;
 import org.apache.cassandra.utils.btree.BTreeSearchIterator;
@@ -28,6 +30,14 @@ public class SerializationHelper
     public final SerializationHeader header;
     private BTreeSearchIterator<ColumnMetadata, ColumnMetadata> statics = null;
     private BTreeSearchIterator<ColumnMetadata, ColumnMetadata> regulars = null;
+
+    // reusable fields to avoid extra allocation during cells processing
+    // within org.apache.cassandra.db.rows.UnfilteredSerializer.serializeRowBody
+    int flags;
+    LivenessInfo pkLiveness;
+
+    DataOutputPlus out;
+    SearchIterator<ColumnMetadata, ColumnMetadata> si;
 
     public SerializationHelper(SerializationHeader header)
     {
