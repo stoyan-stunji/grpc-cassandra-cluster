@@ -33,6 +33,7 @@ import org.apache.cassandra.concurrent.DebuggableTask;
 import org.apache.cassandra.concurrent.Stage;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ConsistencyLevel;
+import org.apache.cassandra.db.CounterMutation;
 import org.apache.cassandra.db.IMutation;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.Mutation;
@@ -78,7 +79,7 @@ public class TrackedWriteRequest
      * @param requestTime object holding times when request got enqueued and started execution
      */
     public static AbstractWriteResponseHandler<?> perform(
-        Mutation mutation, ConsistencyLevel consistencyLevel, Dispatcher.RequestTime requestTime)
+        IMutation mutation, ConsistencyLevel consistencyLevel, Dispatcher.RequestTime requestTime)
     {
         Tracing.trace("Determining replicas for mutation");
 
@@ -95,23 +96,45 @@ public class TrackedWriteRequest
             if (logger.isTraceEnabled())
                 logger.trace("Remote tracked request {} {}", mutation, plan);
             writeMetrics.remoteRequests.mark();
-            return ForwardedWrite.forwardMutation(mutation, plan, rs, requestTime);
+
+            if (mutation instanceof CounterMutation)
+                return ForwardedWrite.forwardCounterMutation((CounterMutation) mutation, plan, rs, requestTime);
+            else
+                return ForwardedWrite.forwardMutation((Mutation) mutation, plan, rs, requestTime);
         }
 
         if (logger.isTraceEnabled())
             logger.trace("Local tracked request {} {}", mutation, plan);
         writeMetrics.localRequests.mark();
+
         MutationId id = MutationTrackingService.instance.nextMutationId(keyspaceName, token);
-        mutation = mutation.withMutationId(id);
 
-        if (logger.isTraceEnabled())
-            logger.trace("Write replication plan for mutation {}: live={}, pending={}, all={}",
-                         id, plan.live(), plan.pending(), plan.contacts());
+        if (mutation instanceof CounterMutation)
+        {
+            if (logger.isTraceEnabled())
+                logger.trace("Write replication plan for counter mutation {}: live={}, pending={}, all={}",
+                             id, plan.live(), plan.pending(), plan.contacts());
 
-        TrackedWriteResponseHandler handler =
+            TrackedWriteResponseHandler handler =
+                TrackedWriteResponseHandler.wrap(rs.getWriteResponseHandler(plan, null, WriteType.COUNTER, null, requestTime), id);
+
+            Mutation result = ((CounterMutation) mutation).applyCounterMutation(id);
+            sendToReplicasOnly(result, plan, handler, null);
+            return handler;
+        }
+        else
+        {
+            mutation = mutation.withMutationId(id);
+
+            if (logger.isTraceEnabled())
+                logger.trace("Write replication plan for mutation {}: live={}, pending={}, all={}",
+                             id, plan.live(), plan.pending(), plan.contacts());
+
+            TrackedWriteResponseHandler handler =
             TrackedWriteResponseHandler.wrap(rs.getWriteResponseHandler(plan, null, WriteType.SIMPLE, null, requestTime), id);
-        applyLocallyAndSendToReplicas(mutation, plan, handler);
-        return handler;
+            applyLocallyAndSendToReplicas((Mutation) mutation, plan, handler);
+            return handler;
+        }
     }
 
     public static void applyLocallyAndSendToReplicas(Mutation mutation, ReplicaPlan.ForWrite plan, TrackedWriteResponseHandler handler)
@@ -208,6 +231,121 @@ public class TrackedWriteRequest
                 if (logger.isTraceEnabled())
                     logger.trace("Sending mutation {} to remote dc replicas {}", mutation.id(), dcReplicas);
                 sendMessagesToRemoteDC(message, EndpointsForToken.copyOf(mutation.key().getToken(), dcReplicas), handler, null);
+                for (Replica replica : dcReplicas)
+                    remoteReplicas.add(ClusterMetadata.current().directory.peerId(replica.endpoint()).id());
+            }
+        }
+
+        if (remoteReplicas != null)
+        {
+            if (logger.isTraceEnabled())
+                logger.trace("Sending mutation {} to remote replicas {}", mutation.id(), remoteReplicas);
+            MutationTrackingService.instance.sentWriteRequest(mutation, remoteReplicas);
+        }
+    }
+
+    /**
+     * Send a mutation to remote replicas only, without applying it locally.
+     * This is used for counter mutations where the mutation has already been applied locally
+     * by applyCounterMutation() before assigning the mutation ID.
+     *
+     * @param mutation the mutation with assigned ID to send to replicas
+     * @param plan the replica plan
+     * @param handler the response handler
+     * @param coordinatorAckInfo optional coordinator info for forwarded writes (null for local coordinator)
+     */
+    public static void sendToReplicasOnly(Mutation mutation, ReplicaPlan.ForWrite plan, TrackedWriteResponseHandler handler, ForwardedWrite.CoordinatorAckInfo coordinatorAckInfo)
+    {
+        String localDataCenter = DatabaseDescriptor.getLocator().local().datacenter;
+        List<Replica> localDCReplicas = null;
+        Map<String, List<Replica>> remoteDCReplicas = null;
+
+        // create a Message for non-local writes
+        Message<Mutation> message = null;
+
+        // Serialize this mutation now so when we send it to multiple replicas concurrently,
+        // they all use the cached serialized bytes instead of re-serializing it multiple times.
+        Mutation.serializer.prepareSerializedBuffer(mutation, MessagingService.current_version);
+
+        boolean foundSelf = false;
+        for (Replica destination : plan.contacts())
+        {
+            if (!plan.isAlive(destination))
+            {
+                if (logger.isTraceEnabled())
+                    logger.trace("Skipping dead replica {} for mutation {}", destination, mutation.id());
+                handler.expired(); // immediately mark the response as expired since the request will not be sent
+                continue;
+            }
+
+            if (destination.isSelf())
+            {
+                foundSelf = true; // Mutation was already applied locally
+                continue;
+            }
+
+            if (message == null)
+            {
+                Message.Builder<Mutation> builder = Message.builder(MUTATION_REQ, mutation)
+                                                           .withRequestTime(handler.getRequestTime())
+                                                           .withFlag(MessageFlag.CALL_BACK_ON_FAILURE);
+
+                // If this is a forwarded write, include coordinator ack info so replicas
+                // know to respond to the original coordinator, not this leader
+                if (coordinatorAckInfo != null)
+                    builder.withParam(ParamType.COORDINATOR_ACK_INFO, coordinatorAckInfo);
+
+                message = builder.build();
+            }
+
+            String dc = DatabaseDescriptor.getLocator().location(destination.endpoint()).datacenter;
+
+            if (localDataCenter.equals(dc))
+            {
+                if (localDCReplicas == null)
+                    localDCReplicas = new ArrayList<>(plan.contacts().size());
+                localDCReplicas.add(destination);
+            }
+            else
+            {
+                if (remoteDCReplicas == null)
+                    remoteDCReplicas = new HashMap<>();
+
+                List<Replica> replicas = remoteDCReplicas.get(dc);
+                if (replicas == null)
+                    replicas = remoteDCReplicas.computeIfAbsent(dc, ignore -> new ArrayList<>(3)); // most DCs will have <= 3 replicas
+                replicas.add(destination);
+            }
+        }
+
+        Preconditions.checkState(foundSelf, "Coordinator must be a replica for tracked counter mutations");
+
+        // Notify handler that local write succeeded (mutation was already applied before calling this method)
+        handler.onResponse(null);
+
+        IntHashSet remoteReplicas = null;
+        if (localDCReplicas != null || remoteDCReplicas != null)
+            remoteReplicas = new IntHashSet();
+
+        if (localDCReplicas != null)
+        {
+            for (Replica replica : localDCReplicas)
+            {
+                if (logger.isTraceEnabled())
+                    logger.trace("Sending mutation {} to local replica {}", mutation.id(), replica);
+                MessagingService.instance().sendWriteWithCallback(message, replica, handler);
+                remoteReplicas.add(ClusterMetadata.current().directory.peerId(replica.endpoint()).id());
+            }
+        }
+
+        if (remoteDCReplicas != null)
+        {
+            // for each datacenter, send the message to one node to relay the write to other replicas
+            for (List<Replica> dcReplicas : remoteDCReplicas.values())
+            {
+                if (logger.isTraceEnabled())
+                    logger.trace("Sending mutation {} to remote dc replicas {}", mutation.id(), dcReplicas);
+                sendMessagesToRemoteDC(message, EndpointsForToken.copyOf(mutation.key().getToken(), dcReplicas), handler, coordinatorAckInfo);
                 for (Replica replica : dcReplicas)
                     remoteReplicas.add(ClusterMetadata.current().directory.peerId(replica.endpoint()).id());
             }
