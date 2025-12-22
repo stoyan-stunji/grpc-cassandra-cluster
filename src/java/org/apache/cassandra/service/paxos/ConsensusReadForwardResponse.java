@@ -168,10 +168,7 @@ public class ConsensusReadForwardResponse
                     UnfilteredRowIteratorSerializer.Header header = UnfilteredRowIteratorSerializer.serializer.deserializeHeader(metadata, in, version, FROM_REMOTE, STABLE, null);
                     try (UnfilteredRowIterator partition = UnfilteredRowIteratorSerializer.serializer.deserialize(in, version, metadata, FROM_REMOTE, header))
                     {
-                        RowIterator rowIterator = UnfilteredRowIterators.filter(partition, 0);
-                        // Materialize the row iterator since we're closing the unfiltered one
-                        FilteredPartition materialized = new FilteredPartition(rowIterator);
-                        result = materialized.rowIterator(false);
+                        result = UnfilteredRowIterators.filter(partition, 0);
                     }
                 }
             }

@@ -35,6 +35,7 @@ import org.apache.cassandra.replication.MutationId;
 import org.apache.cassandra.replication.MutationTrackingService;
 import org.apache.cassandra.schema.KeyspaceMetadata;
 import org.apache.cassandra.schema.Schema;
+import org.apache.cassandra.tcm.ClusterMetadataService;
 import org.apache.cassandra.tracing.Tracing;
 import org.apache.cassandra.utils.concurrent.ConditionAsConsumer;
 
@@ -53,14 +54,14 @@ public class Paxos2CommitForwardHandler implements IVerbHandler<Paxos2CommitForw
     @Override
     public void doVerb(Message<Paxos2CommitForwardRequest> message)
     {
+        // Ensure we have up-to-date cluster metadata before executing the forwarded commit
+        ClusterMetadataService.instance().fetchLogFromPeerOrCMS(message.from(), message.header.epoch);
         Paxos2CommitForwardRequest request = message.payload;
-        
+
         Tracing.trace("Executing forwarded Paxos V2 commit for {}", request.commit.partitionKey());
 
         try
         {
-            Commit.Agreed commitToExecute = request.commit;
-            
             // Generate proper mutation ID for tracked keyspaces
             String ksName = request.commit.metadata().keyspace;
             KeyspaceMetadata ksMetadata = Schema.instance.getKeyspaceMetadata(ksName);
@@ -71,7 +72,6 @@ public class Paxos2CommitForwardHandler implements IVerbHandler<Paxos2CommitForw
                 return;
             }
 
-            // TODO(review): Is it necessary to fail here?
             if (!ksMetadata.params.replicationType.isTracked())
                 throw new IllegalStateException("Asked to perform forwarded commit, but keyspace " + ksName + " is not tracked");
 
@@ -80,7 +80,7 @@ public class Paxos2CommitForwardHandler implements IVerbHandler<Paxos2CommitForw
 
             // Create commit with proper mutation ID
             Mutation mutationWithId = request.commit.makeMutation(mutationId);
-            commitToExecute = new Commit.Agreed(request.commit.ballot, mutationWithId);
+            Commit.Agreed commitToExecute = new Commit.Agreed(request.commit.ballot, mutationWithId);
 
             // Execute the commit operation using the updated PaxosCommit.commit method
             ConditionAsConsumer<PaxosCommit.Status> onDone = newConditionAsConsumer();

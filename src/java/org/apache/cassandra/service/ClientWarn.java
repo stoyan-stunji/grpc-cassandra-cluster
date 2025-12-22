@@ -216,7 +216,7 @@ public class ClientWarn extends ExecutorLocals.Impl
          * Start deferring warnings. Records the current position in the warnings list
          * as the insertion point for when deferred warnings are committed.
          */
-        void startDeferring()
+        synchronized void startDeferring()
         {
             insertionPoint = warnings == null ? 0 : warnings.size();
             deferredWarnings = null;

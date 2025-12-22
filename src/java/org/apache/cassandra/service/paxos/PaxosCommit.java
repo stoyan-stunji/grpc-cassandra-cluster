@@ -483,7 +483,7 @@ public class PaxosCommit<OnDone extends Consumer<? super PaxosCommit.Status>> ex
     /**
      * Forwards a Paxos V2 commit operation to a replica coordinator for tracked keyspaces.
      */
-    private static <T extends Consumer<Status>> void forwardPaxos2Commit(Agreed commit, 
+    private static <T extends Consumer<Status>> void forwardPaxos2Commit(Agreed commit,
                                                                          EndpointsForToken all,
                                                                          EndpointsForToken allLive,
                                                                          EndpointsForToken allDown,
@@ -494,54 +494,63 @@ public class PaxosCommit<OnDone extends Consumer<? super PaxosCommit.Status>> ex
                                                                          T onDone)
     {
         InetAddressAndPort localEndpoint = FBUtilities.getBroadcastAddressAndPort();
-        
-        // Find first live replica to forward to
-        InetAddressAndPort replicaCoordinator = null;
-        for (InetAddressAndPort endpoint : all.endpoints())
+
+        // Filter out local endpoint and sort by proximity to find best replica to forward to
+        EndpointsForToken liveReplicasExcludingSelf = allLive.filter(r -> !r.endpoint().equals(localEndpoint));
+
+        if (liveReplicasExcludingSelf.isEmpty())
         {
-            if (!endpoint.equals(localEndpoint) && allLive.contains(endpoint))
-            {
-                replicaCoordinator = endpoint;
-                break;
-            }
-        }
-        
-        if (replicaCoordinator == null)
-        {
-            // No live replica available
-            onDone.accept(new Status(new Paxos.MaybeFailure(true, all.size(), required, 0, emptyMap())));
+            // No live replica available to forward to
+            logger.debug("No live replicas available to forward Paxos V2 commit for {}", commit.partitionKey());
+            Tracing.trace("No live replicas available to forward Paxos V2 commit");
+            onDone.accept(new Status(new Paxos.MaybeFailure(true, 1, 1, 0, emptyMap())));
             return;
         }
-        
+
+        // Sort by proximity and select the best coordinator
+        EndpointsForToken sortedReplicas = DatabaseDescriptor.getNodeProximity().sortedByProximity(localEndpoint, liveReplicasExcludingSelf);
+        InetAddressAndPort replicaCoordinator = sortedReplicas.get(0).endpoint();
+
+        logger.debug("Forwarding Paxos V2 commit for {} to replica coordinator {}", commit.partitionKey(), replicaCoordinator);
+        Tracing.trace("Forwarding Paxos V2 commit to replica coordinator {}", replicaCoordinator);
+
         // Create forward request with extracted participant data
-        Paxos2CommitForwardRequest forwardRequest = new Paxos2CommitForwardRequest(commit, consistencyForConsensus, consistencyForCommit, 
+        Paxos2CommitForwardRequest forwardRequest = new Paxos2CommitForwardRequest(commit, consistencyForConsensus, consistencyForCommit,
                                                                                    all, allLive, allDown,
                                                                                    required, isUrgent);
         Message<Paxos2CommitForwardRequest> message = Message.out(Verb.PAXOS2_COMMIT_FORWARD_REQ, forwardRequest);
-        
+
         // Create callback to handle forwarding response
         RequestCallback<NoPayload> callback = new RequestCallback<NoPayload>()
         {
             @Override
             public void onResponse(Message<NoPayload> response)
             {
+                Tracing.trace("Forwarded Paxos V2 commit completed successfully");
                 onDone.accept(success);
             }
 
             @Override
-            public void onFailure(InetAddressAndPort from, RequestFailure reason)
+            public void onFailure(InetAddressAndPort from, RequestFailure failure)
             {
-                onDone.accept(new Status(new Paxos.MaybeFailure(true, all.size(), required, 0, emptyMap())));
+                logger.debug("Forwarded Paxos V2 commit to {} failed: {}", from, failure);
+                Tracing.trace("Forwarded Paxos V2 commit to {} failed: {}", from, failure);
+                // Populate the failure map with the actual failure reason; contacted=1, required=1 for forwarded request
+                onDone.accept(new Status(new Paxos.MaybeFailure(true, 1, 1, 0,
+                                                                java.util.Collections.singletonMap(from, failure.reason))));
             }
         };
-        
+
         try
         {
             MessagingService.instance().sendWithCallback(message, replicaCoordinator, callback);
         }
         catch (Exception e)
         {
-            onDone.accept(new Status(new Paxos.MaybeFailure(true, all.size(), required, 0, emptyMap())));
+            logger.debug("Failed to send forwarded Paxos V2 commit to {}: {}", replicaCoordinator, e.getMessage());
+            Tracing.trace("Failed to send forwarded Paxos V2 commit: {}", e.getMessage());
+            onDone.accept(new Status(new Paxos.MaybeFailure(true, 1, 1, 0,
+                                                            java.util.Collections.singletonMap(replicaCoordinator, UNKNOWN))));
         }
     }
 

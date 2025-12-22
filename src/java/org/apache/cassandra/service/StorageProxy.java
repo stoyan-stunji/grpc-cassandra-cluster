@@ -4266,7 +4266,11 @@ private static ConsensusAttemptResult legacyCas(TableMetadata metadata,
 
             // Check if the forwarded operation had an exception
             if (!response.isSuccess())
+            {
+                // Discard deferred warnings since the operation failed
+                ClientWarn.instance.discardDeferredWarnings();
                 throw response.exception;
+            }
 
             // Commit or discard deferred warnings based on whether conditions passed
             if (response.result == null)
@@ -4284,11 +4288,15 @@ private static ConsensusAttemptResult legacyCas(TableMetadata metadata,
         }
         catch (CassandraException ce)
         {
+            // Discard deferred warnings since the operation failed
+            ClientWarn.instance.discardDeferredWarnings();
             // Rethrow CassandraExceptions from the replica coordinator
             throw ce;
         }
         catch (Exception e)
         {
+            // Discard deferred warnings since the operation failed
+            ClientWarn.instance.discardDeferredWarnings();
             throw new RuntimeException("Failed to forward CAS operation to replica coordinator", e);
         }
     }

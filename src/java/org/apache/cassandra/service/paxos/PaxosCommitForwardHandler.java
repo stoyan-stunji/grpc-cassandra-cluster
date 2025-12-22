@@ -64,7 +64,6 @@ public class PaxosCommitForwardHandler implements IVerbHandler<PaxosCommitForwar
                 return;
             }
 
-            // TODO(review): Is it necessary to fail here?
             if (!keyspace.getMetadata().params.replicationType.isTracked())
                 throw new IllegalStateException("Asked to perform forwarded commit, but keyspace " + ksName + " is not tracked");
 
