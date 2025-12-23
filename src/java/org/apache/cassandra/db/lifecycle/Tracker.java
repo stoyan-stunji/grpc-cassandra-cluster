@@ -26,6 +26,7 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Function;
 import com.google.common.base.Predicate;
 import com.google.common.base.Predicates;
+import com.google.common.base.Supplier;
 import com.google.common.collect.*;
 
 import org.apache.cassandra.db.ColumnFamilyStore;
@@ -36,12 +37,14 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.db.compaction.CompactionController;
 import org.apache.cassandra.db.compaction.OperationType;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.sstable.metadata.StatsMetadata;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.metrics.StorageMetrics;
 import org.apache.cassandra.notifications.*;
+import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.Pair;
 import org.apache.cassandra.utils.Throwables;
 import org.apache.cassandra.utils.concurrent.OpOrder;
@@ -398,6 +401,23 @@ public class Tracker
     public Iterable<SSTableReader> getUncompacting(Iterable<SSTableReader> candidates)
     {
         return view.get().getUncompacting(candidates);
+    }
+
+    public Function<View, Iterable<SSTableReader>> getNotFullyExpired()
+    {
+        return View.select(SSTableSet.CANONICAL, new Supplier<Set<SSTableReader>>()
+        {
+            @Override
+            public Set<SSTableReader> get()
+            {
+                try (CompactionController cc = new CompactionController(cfstore,
+                                                                        getCompacting(),
+                                                                        cfstore.gcBefore(FBUtilities.nowInSeconds())))
+                {
+                    return cc.getFullyExpiredSSTables();
+                }
+            }
+        });
     }
 
     public void maybeIncrementallyBackup(final Iterable<SSTableReader> sstables)
