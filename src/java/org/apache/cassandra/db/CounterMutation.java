@@ -161,6 +161,21 @@ public class CounterMutation implements IMutation
      */
     public Mutation applyCounterMutation() throws WriteTimeoutException
     {
+        return applyCounterMutation(null);
+    }
+
+    /**
+     * Applies the counter mutation with an optional mutation ID for tracked keyspaces.
+     *
+     * For tracked keyspaces, the mutation ID is assigned to the concrete result BEFORE
+     * it is applied, ensuring the concrete counter values (not the operation) are
+     * journaled and tracked with the ID.
+     *
+     * @param mutationId the mutation ID to assign to the concrete result, or null for non-tracked
+     * @return the applied resulting Mutation (with ID if provided)
+     */
+    public Mutation applyCounterMutation(MutationId mutationId) throws WriteTimeoutException
+    {
         Mutation.PartitionUpdateCollector resultBuilder = new Mutation.PartitionUpdateCollector(id(), getKeyspaceName(), key());
         Keyspace keyspace = Keyspace.open(getKeyspaceName());
 
@@ -173,6 +188,12 @@ public class CounterMutation implements IMutation
                 resultBuilder.add(processModifications(upd));
 
             Mutation result = resultBuilder.build();
+
+            // For tracked keyspaces, assign the mutation ID to the result before
+            // calling result.apply() since applyInternalTracked() requires an ID
+            if (mutationId != null && !mutationId.isNone())
+                result = result.withMutationId(mutationId);
+
             result.apply();
             return result;
         }
