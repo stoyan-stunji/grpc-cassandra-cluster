@@ -257,10 +257,9 @@ public class Gossiper implements IFailureDetectionEventListener, GossiperMBean, 
     {
         public void run()
         {
+            taskLock.lock();
             try
             {
-                taskLock.lock();
-
                 /* Update the local heartbeat counter. */
                 endpointStateMap.get(getBroadcastAddressAndPort()).updateHeartBeat();
                 if (logger.isTraceEnabled())
