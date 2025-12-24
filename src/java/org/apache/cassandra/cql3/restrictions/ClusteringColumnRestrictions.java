@@ -29,6 +29,7 @@ import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.cql3.QueryOptions;
+import org.apache.cassandra.cql3.Operator;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.filter.RowFilter;
 import org.apache.cassandra.exceptions.InvalidRequestException;
@@ -206,6 +207,17 @@ final class ClusteringColumnRestrictions extends RestrictionSetWrapper
 
     private boolean handleInFilter(SingleRestriction restriction, int index)
     {
-        return restriction.needsFilteringOrIndexing() || index != restriction.firstColumn().position();
+        // Allow BETWEEN on the first clustering column to be handled via row filter
+        if (restriction instanceof SimpleRestriction)
+        {
+            SimpleRestriction sr = (SimpleRestriction) restriction;
+            if (sr.operator() == Operator.BETWEEN &&
+                    index == sr.firstColumn().position())
+            {
+                return true;
+            }
+        }
+        // Default: require filtering or non‑leading‑column position
+        return restriction.needsFilteringOrIndexing() ||index != restriction.firstColumn().position();
     }
 }
