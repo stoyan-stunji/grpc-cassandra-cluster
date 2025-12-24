@@ -22,12 +22,21 @@ import java.util.HashSet;
 import java.util.Set;
 
 import org.junit.Assert;
+import org.junit.BeforeClass;
 import org.junit.Test;
+
+import org.apache.cassandra.SchemaLoader;
 
 import static org.apache.cassandra.audit.AuditLogFilter.isFiltered;
 
 public class AuditLogFilterTest
 {
+    @BeforeClass
+    public static void beforeClass()
+    {
+        SchemaLoader.prepareServer();
+    }
+
     @Test
     public void testInputWithSpaces()
     {
