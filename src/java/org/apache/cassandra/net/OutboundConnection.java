@@ -1075,7 +1075,6 @@ public class OutboundConnection
      *
      *  Most of the actual work is performed by OutboundConnectionInitiator, this method just manages
      *  our book keeping on either success or failure.
-     *
      *  This method is only to be invoked by the eventLoop, and the inner class' methods should only be evaluated by the eventtLoop
      */
     Future<?> initiate()
@@ -1127,42 +1126,45 @@ public class OutboundConnection
                         // it is expected that close, if successful, has already cancelled us; so we do not need to worry about leaking connections
                         assert !state.isClosed();
 
-                        MessagingSuccess success = result.success();
-                        debug.onConnect(success.messagingVersion, settings);
-                        state.disconnected().maintenance.cancel(false);
+                        if (result.success() instanceof MessagingSuccess success)
+                        {
+                            debug.onConnect(success.messagingVersion, settings);
+                            state.disconnected().maintenance.cancel(false);
 
-                        FrameEncoder.PayloadAllocator payloadAllocator = success.allocator;
-                        Channel channel = success.channel;
-                        Established established = new Established(success.messagingVersion, channel, payloadAllocator, settings);
-                        state = established;
-                        channel.pipeline().addLast("handleExceptionalStates", new ChannelInboundHandlerAdapter() {
-                            @Override
-                            public void channelInactive(ChannelHandlerContext ctx)
+                            FrameEncoder.PayloadAllocator payloadAllocator = success.allocator;
+                            Channel channel = success.channel;
+                            Established established = new Established(success.messagingVersion, channel, payloadAllocator, settings);
+                            state = established;
+                            channel.pipeline().addLast("handleExceptionalStates", new ChannelInboundHandlerAdapter()
                             {
-                                disconnectNow(established);
-                                ctx.fireChannelInactive();
-                            }
-
-                            @Override
-                            public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause)
-                            {
-                                try
+                                @Override
+                                public void channelInactive(ChannelHandlerContext ctx)
                                 {
-                                    invalidateChannel(established, cause);
+                                    disconnectNow(established);
+                                    ctx.fireChannelInactive();
                                 }
-                                catch (Throwable t)
-                                {
-                                    logger.error("Unexpected exception in {}.exceptionCaught", this.getClass().getSimpleName(), t);
-                                }
-                            }
-                        });
-                        ++successfulConnections;
 
-                        logger.info("{} successfully connected, version = {}, framing = {}, encryption = {}",
-                                    id(true),
-                                    success.messagingVersion,
-                                    settings.framing,
-                                    encryptionConnectionSummary(channel));
+                                @Override
+                                public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause)
+                                {
+                                    try
+                                    {
+                                        invalidateChannel(established, cause);
+                                    }
+                                    catch (Throwable t)
+                                    {
+                                        logger.error("Unexpected exception in {}.exceptionCaught", this.getClass().getSimpleName(), t);
+                                    }
+                                }
+                            });
+                            ++successfulConnections;
+
+                            logger.info("{} successfully connected, version = {}, framing = {}, encryption = {}",
+                                        id(true),
+                                        success.messagingVersion,
+                                        settings.framing,
+                                        encryptionConnectionSummary(channel));
+                        }
                         break;
 
                     case RETRY:
