@@ -78,6 +78,10 @@ public class BulkLoader
         DatabaseDescriptor.setInterDCStreamThroughputOutboundBytesPerSec(options.interDcThrottleBytes);
         DatabaseDescriptor.setEntireSSTableStreamThroughputOutboundMebibytesPerSec(options.entireSSTableThrottleMebibytes);
         DatabaseDescriptor.setEntireSSTableInterDCStreamThroughputOutboundMebibytesPerSec(options.entireSSTableInterDcThrottleMebibytes);
+        if (options.disableZeroCopyStreaming)
+        {
+            DatabaseDescriptor.setStreamEntireSSTables(false);
+        }
         StreamResultFuture future;
 
         ProgressIndicator indicator = new ProgressIndicator();

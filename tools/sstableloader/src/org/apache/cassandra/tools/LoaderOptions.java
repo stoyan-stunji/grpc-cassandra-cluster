@@ -95,6 +95,7 @@ public class LoaderOptions
     public static final String TOOL_NAME = "sstableloader";
     public static final String TARGET_KEYSPACE = "target-keyspace";
     public static final String TARGET_TABLE = "target-table";
+    public static final String DISABLE_ZERO_COPY_STREAMING = "disable-zero-copy-streaming";
 
     /* client encryption options */
     public static final String SSL_TRUSTSTORE = "truststore";
@@ -127,6 +128,7 @@ public class LoaderOptions
     public final Set<InetAddressAndPort> ignores;
     public final String targetKeyspace;
     public final String targetTable;
+    public final boolean disableZeroCopyStreaming;
 
     LoaderOptions(Builder builder)
     {
@@ -151,6 +153,7 @@ public class LoaderOptions
         ignores = builder.ignores;
         targetKeyspace = builder.targetKeyspace;
         targetTable = builder.targetTable;
+        disableZeroCopyStreaming = builder.disableZeroCopyStreaming;
     }
 
     static class Builder
@@ -182,6 +185,7 @@ public class LoaderOptions
         Set<InetAddressAndPort> ignores = new HashSet<>();
         String targetKeyspace;
         String targetTable;
+        boolean disableZeroCopyStreaming = false;
 
         Builder()
         {
@@ -413,6 +417,12 @@ public class LoaderOptions
         public Builder targetTable(String table)
         {
             this.targetKeyspace = table;
+            return this;
+        }
+
+        public Builder disableZeroCopyStreaming(boolean disableZeroCopyStreaming)
+        {
+            this.disableZeroCopyStreaming = disableZeroCopyStreaming;
             return this;
         }
 
@@ -690,6 +700,11 @@ public class LoaderOptions
                         errorMsg("Empty table is not supported.", options);
                 }
 
+                if (cmd.hasOption(DISABLE_ZERO_COPY_STREAMING))
+                {
+                    disableZeroCopyStreaming = true;
+                }
+
                 return this;
             }
             catch (ParseException | ConfigurationException | MalformedURLException e)
@@ -801,6 +816,7 @@ public class LoaderOptions
         options.addOption("f", CONFIG_PATH, "path to config file", "cassandra.yaml file path for streaming throughput and client/server SSL.");
         options.addOption("k", TARGET_KEYSPACE, "target keyspace name", "target keyspace name");
         options.addOption("tb", TARGET_TABLE, "target table name", "target table name");
+        options.addOption(null, DISABLE_ZERO_COPY_STREAMING, "disable zero-copy streaming (required for loading legacy 3.x sstables)");
         return options;
     }
 
@@ -815,7 +831,9 @@ public class LoaderOptions
         String footer = System.lineSeparator() +
                 "You can provide cassandra.yaml file with -f command line option to set up streaming throughput, client and server encryption options. " +
                 "Only stream_throughput_outbound, server_encryption_options and client_encryption_options are read from yaml. " +
-                "You can override options read from cassandra.yaml with corresponding command line options.";
+                "You can override options read from cassandra.yaml with corresponding command line options." +
+                System.lineSeparator() +
+                "Note: Use --disable-zero-copy-streaming when loading SSTables from Cassandra 3.x.";
         new HelpFormatter().printHelp(usage, header, options, footer);
     }
 }
