@@ -1429,22 +1429,24 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
 
     public RandomAccessReader openDataReaderForScan(DiskAccessMode diskAccessMode)
     {
-        if (diskAccessMode == dfile.diskAccessMode())
-        {
-            return dfile.createReaderForScan(OnReaderClose.RETAIN_FILE_OPEN);
-        }
+        boolean isSameDiskAccessMode = diskAccessMode == dfile.diskAccessMode();
+        boolean isDirectIONotSupported = diskAccessMode == DiskAccessMode.direct && !directIOSupported;
 
-        if (diskAccessMode == DiskAccessMode.direct && !directIOSupported)
-        {
+        if (isSameDiskAccessMode || isDirectIONotSupported)
             return dfile.createReaderForScan(OnReaderClose.RETAIN_FILE_OPEN);
-        }
 
-        //noinspection resource - The FileHandle lifecycle is managed by the returned RandomAccessReader
         FileHandle dataFile = dfile.toBuilder()
                                    .withDiskAccessMode(diskAccessMode)
                                    .complete();
-
-        return dataFile.createReaderForScan(OnReaderClose.CLOSE_FILE);
+        try
+        {
+            return dataFile.createReaderForScan(OnReaderClose.CLOSE_FILE);
+        }
+        catch (Throwable t)
+        {
+            dataFile.close();
+            throw t;
+        }
     }
 
     public void trySkipFileCacheBefore(DecoratedKey key)
