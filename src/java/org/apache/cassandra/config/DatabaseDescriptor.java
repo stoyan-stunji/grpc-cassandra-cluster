@@ -659,7 +659,19 @@ public class DatabaseDescriptor
         }
         logger.info("DiskAccessMode is {}, indexAccessMode is {}", conf.disk_access_mode, indexAccessMode);
 
-        compactionReadDiskAccessMode = resolveCompactionReadDiskAccessMode(conf.disk_access_mode, conf.compaction_read_disk_access_mode);
+        if (DiskAccessMode.auto == conf.compaction_read_disk_access_mode)
+        {
+            compactionReadDiskAccessMode = conf.disk_access_mode;
+        }
+        else if (DiskAccessMode.direct == conf.compaction_read_disk_access_mode)
+        {
+            compactionReadDiskAccessMode = DiskAccessMode.direct;
+        }
+        else
+        {
+            throw new IllegalArgumentException("Unsupported disk access mode for compaction_read_disk_access_mode " +
+                                               "(options: direct/auto) " + conf.compaction_read_disk_access_mode);
+        }
         logger.info("compaction_read_disk_access_mode resolved to: {}", compactionReadDiskAccessMode);
 
         /* phi convict threshold for FailureDetector */
@@ -1744,24 +1756,6 @@ public class DatabaseDescriptor
         }
 
         partitionerName = partitioner.getClass().getCanonicalName();
-    }
-
-    private static DiskAccessMode resolveCompactionReadDiskAccessMode(DiskAccessMode defaultDiskAccessMode,
-                                                                      DiskAccessMode compactionReadDiskAccessMode)
-    {
-        if (DiskAccessMode.auto == compactionReadDiskAccessMode)
-        {
-            return defaultDiskAccessMode;
-        }
-        else if (DiskAccessMode.direct == compactionReadDiskAccessMode)
-        {
-            return DiskAccessMode.direct;
-        }
-        else
-        {
-            throw new IllegalArgumentException("Unsupported disk access mode for compaction_read_disk_access_mode " +
-                                               "(options: direct/auto) " + compactionReadDiskAccessMode);
-        }
     }
 
     private static Pair<DiskAccessMode, Boolean> resolveCommitLogWriteDiskAccessMode(DiskAccessMode providedDiskAccessMode)

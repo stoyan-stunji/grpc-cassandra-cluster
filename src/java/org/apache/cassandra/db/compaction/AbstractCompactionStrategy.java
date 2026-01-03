@@ -53,7 +53,6 @@ import org.apache.cassandra.io.sstable.metadata.StatsMetadata;
 import org.apache.cassandra.schema.CompactionParams;
 import org.apache.cassandra.utils.TimeUUID;
 
-import static org.apache.cassandra.config.Config.DiskAccessMode;
 import static org.apache.cassandra.utils.Clock.Global.currentTimeMillis;
 
 /**
@@ -263,7 +262,7 @@ public abstract class AbstractCompactionStrategy
         try
         {
             for (SSTableReader sstable : sstables)
-                scanners.add(sstable.getScanner(ranges, compactionReadDiskAccessMode()));
+                scanners.add(sstable.getScanner(ranges, DatabaseDescriptor.getCompactionReadDiskAccessMode()));
         }
         catch (Throwable t)
         {
@@ -583,10 +582,4 @@ public abstract class AbstractCompactionStrategy
     {
         return true;
     }
-
-    protected static DiskAccessMode compactionReadDiskAccessMode()
-    {
-        return DatabaseDescriptor.getCompactionReadDiskAccessMode();
-    }
-
 }
