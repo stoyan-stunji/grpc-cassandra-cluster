@@ -739,6 +739,11 @@ public final class FileUtils
         }
     }
 
+    /**
+     * Check if Direct I/O is supported for the given file's filesystem.
+     * Note: blockSize() > 0 check is intentional. Some filesystems (virtual/in-memory/network)
+     * may return 0 for block size, which we treat as "Direct I/O not supported".
+     */
     public static boolean isDirectIOSupported(File file)
     {
         try
