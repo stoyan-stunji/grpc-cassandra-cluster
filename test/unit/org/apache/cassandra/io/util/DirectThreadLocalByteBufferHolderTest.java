@@ -31,31 +31,65 @@ public class DirectThreadLocalByteBufferHolderTest
         int blockSize = 4096;
         int alignedBufferSize = blockSize * 4;
 
+        try (DirectThreadLocalByteBufferHolder holder = new DirectThreadLocalByteBufferHolder(blockSize))
+        {
+            // Initial buffer creation
+            ByteBuffer byteBuffer = holder.getBuffer(alignedBufferSize);
+
+            Assert.assertEquals(alignedBufferSize, byteBuffer.limit());
+            Assert.assertEquals(0, byteBuffer.position());
+            Assert.assertEquals(byteBuffer, holder.local.get());
+            byteBuffer.put(new byte[alignedBufferSize]);
+
+            // Re-use buffer of same size
+            byteBuffer = holder.getBuffer(alignedBufferSize);
+            Assert.assertEquals(alignedBufferSize, byteBuffer.limit());
+            Assert.assertEquals(0, byteBuffer.position());
+            byteBuffer.put(new byte[alignedBufferSize]);
+
+            // Get buffer of a different, greater, non-aligned size
+            alignedBufferSize += alignedBufferSize + blockSize;
+            int nonAlignedBufferSize = alignedBufferSize - (blockSize / 2);
+
+            ByteBuffer oldBuffer = byteBuffer;
+            byteBuffer = holder.getBuffer(nonAlignedBufferSize);
+            Assert.assertEquals(alignedBufferSize, byteBuffer.limit());
+            Assert.assertEquals(0, byteBuffer.position());
+            Assert.assertNotEquals(oldBuffer, holder.local.get());
+            Assert.assertEquals(byteBuffer, holder.local.get());
+        }
+    }
+
+    @Test
+    public void testClose()
+    {
+        int blockSize = 4096;
+        int bufferSize = blockSize * 2;
+
         DirectThreadLocalByteBufferHolder holder = new DirectThreadLocalByteBufferHolder(blockSize);
 
-        // Initial buffer creation
-        ByteBuffer byteBuffer = holder.getBuffer(alignedBufferSize);
+        // Allocate a buffer
+        ByteBuffer buffer = holder.getBuffer(bufferSize);
+        Assert.assertNotNull(buffer);
+        Assert.assertEquals(bufferSize, buffer.limit());
+        Assert.assertNotNull(holder.local.getIfExists());
 
-        Assert.assertEquals(alignedBufferSize, byteBuffer.limit());
-        Assert.assertEquals(0, byteBuffer.position());
-        Assert.assertEquals(byteBuffer, holder.local.get());
-        byteBuffer.put(new byte[alignedBufferSize]);
+        // Close should clean up and remove the ThreadLocal
+        holder.close();
+        Assert.assertNull("ThreadLocal should be removed after close", holder.local.getIfExists());
 
-        // Re-use buffer of same size
-        byteBuffer = holder.getBuffer(alignedBufferSize);
-        Assert.assertEquals(alignedBufferSize, byteBuffer.limit());
-        Assert.assertEquals(0, byteBuffer.position());
-        byteBuffer.put(new byte[alignedBufferSize]);
+        // Multiple close() calls should be safe
+        holder.close();
+        Assert.assertNull(holder.local.getIfExists());
+    }
 
-        // Get buffer of a different, greater, non-aligned size
-        alignedBufferSize += alignedBufferSize + blockSize;
-        int nonAlignedBufferSize = alignedBufferSize - (blockSize / 2);
+    @Test
+    public void testCloseWithoutAllocation()
+    {
+        DirectThreadLocalByteBufferHolder holder = new DirectThreadLocalByteBufferHolder(4096);
 
-        ByteBuffer oldBuffer = byteBuffer;
-        byteBuffer = holder.getBuffer(nonAlignedBufferSize);
-        Assert.assertEquals(alignedBufferSize, byteBuffer.limit());
-        Assert.assertEquals(0, byteBuffer.position());
-        Assert.assertNotEquals(oldBuffer, holder.local.get());
-        Assert.assertEquals(byteBuffer, holder.local.get());
+        // Close without ever allocating should be safe
+        holder.close();
+        Assert.assertNull("ThreadLocal should not exist if never used", holder.local.getIfExists());
     }
 }

@@ -163,6 +163,12 @@ public abstract class CompressedChunkReader extends AbstractReaderFileProxy impl
             }
             return slice;
         }
+
+        @Override
+        public void close()
+        {
+            bufferHolder.close();
+        }
     }
 
     private static class RandomAccessCompressedReader implements CompressedReader
@@ -196,6 +202,12 @@ public abstract class CompressedChunkReader extends AbstractReaderFileProxy impl
                 compressed.position(0).limit(chunk.length);
             }
             return compressed;
+        }
+
+        @Override
+        public void close()
+        {
+            bufferHolder.close();
         }
     }
 
@@ -267,6 +279,7 @@ public abstract class CompressedChunkReader extends AbstractReaderFileProxy impl
         @Override
         public void close()
         {
+            bufferHolder.close();
             readAheadBuffer.close();
         }
     }

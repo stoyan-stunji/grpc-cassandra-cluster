@@ -40,7 +40,7 @@ public final class ThreadLocalByteBufferHolder implements ByteBufferHolder
     {
         for (BufferType bbType : BufferType.values())
         {
-            reusableBBHolder.put(bbType, new FastThreadLocal<ByteBuffer>()
+            reusableBBHolder.put(bbType, new FastThreadLocal<>()
             {
                 protected ByteBuffer initialValue()
                 {
@@ -48,7 +48,7 @@ public final class ThreadLocalByteBufferHolder implements ByteBufferHolder
                 }
             });
         }
-    };
+    }
 
     /**
      * The type of buffer that will be returned
@@ -82,5 +82,16 @@ public final class ThreadLocalByteBufferHolder implements ByteBufferHolder
         }
         buffer.clear().limit(size);
         return buffer;
+    }
+
+    @Override
+    public void close()
+    {
+        ByteBuffer buffer = reusableBB.getIfExists();
+        if (buffer != null && buffer.capacity() > 0)
+        {
+            MemoryUtil.clean(buffer);
+            reusableBB.set(bufferType.allocate(0));
+        }
     }
 }

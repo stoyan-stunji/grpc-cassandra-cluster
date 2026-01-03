@@ -61,4 +61,13 @@ public final class DirectThreadLocalByteBufferHolder implements ByteBufferHolder
         local.set(buffer);
         return buffer;
     }
+
+    @Override
+    public void close()
+    {
+        ByteBuffer buffer = local.getIfExists();
+        if (buffer != null)
+            MemoryUtil.clean(buffer);
+        local.remove();
+    }
 }
