@@ -352,22 +352,21 @@ public abstract class SortedTableWriter<P extends SortedTablePartitionWriter, I 
     {
         int dataBufferSize = ioOptions.diskOptimizationStrategy.bufferSize(statsMetadata.estimatedPartitionSize.percentile(ioOptions.diskOptimizationEstimatePercentile));
 
-
-        FileHandle dataFile;
-        try (CompressionMetadata compressionMetadata = compression ? ((CompressedSequentialWriter) dataWriter).open(lengthOverride) : null)
-        {
-            dataFile = dataFileBuilder.withDiskAccessMode(ioOptions.defaultDiskAccessMode)
-                                      .withMmappedRegionsCache(mmappedRegionsCache)
-                                      .withChunkCache(chunkCache)
-                                      .withCompressionMetadata(compressionMetadata)
-                                      .bufferSize(dataBufferSize)
-                                      .withCrcCheckChance(crcCheckChanceSupplier)
-                                      .withLengthOverride(lengthOverride)
-                                      .complete();
-        }
-
+        FileHandle dataFile = null;
         try
         {
+            try (CompressionMetadata compressionMetadata = compression ? ((CompressedSequentialWriter) dataWriter).open(lengthOverride) : null)
+            {
+                dataFile = dataFileBuilder.withDiskAccessMode(ioOptions.defaultDiskAccessMode)
+                                          .withMmappedRegionsCache(mmappedRegionsCache)
+                                          .withChunkCache(chunkCache)
+                                          .withCompressionMetadata(compressionMetadata)
+                                          .bufferSize(dataBufferSize)
+                                          .withCrcCheckChance(crcCheckChanceSupplier)
+                                          .withLengthOverride(lengthOverride)
+                                          .complete();
+            }
+
             if (chunkCache != null)
             {
                 if (lastEarlyOpenLength != 0 && dataFile.dataLength() > lastEarlyOpenLength)
