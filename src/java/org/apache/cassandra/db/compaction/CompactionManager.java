@@ -1764,7 +1764,7 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
                 {
                     rangesToScan = Collections2.filter(ranges, range -> !transientRanges.contains(range));
                 }
-                return sstable.getScanner(rangesToScan, DatabaseDescriptor.getCompactionScanDiskAccessMode());
+                return sstable.getScanner(rangesToScan, DatabaseDescriptor.getCompactionReadDiskAccessMode());
             }
 
             @Override
@@ -1787,7 +1787,7 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
             @Override
             public ISSTableScanner getScanner(SSTableReader sstable)
             {
-                return sstable.getScanner(DatabaseDescriptor.getCompactionScanDiskAccessMode());
+                return sstable.getScanner(DatabaseDescriptor.getCompactionReadDiskAccessMode());
             }
 
             @Override

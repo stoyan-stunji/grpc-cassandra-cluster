@@ -263,7 +263,7 @@ public abstract class AbstractCompactionStrategy
         try
         {
             for (SSTableReader sstable : sstables)
-                scanners.add(sstable.getScanner(ranges, compactionScanDiskAccessMode()));
+                scanners.add(sstable.getScanner(ranges, compactionReadDiskAccessMode()));
         }
         catch (Throwable t)
         {
@@ -584,9 +584,9 @@ public abstract class AbstractCompactionStrategy
         return true;
     }
 
-    protected static DiskAccessMode compactionScanDiskAccessMode()
+    protected static DiskAccessMode compactionReadDiskAccessMode()
     {
-        return DatabaseDescriptor.getCompactionScanDiskAccessMode();
+        return DatabaseDescriptor.getCompactionReadDiskAccessMode();
     }
 
 }
