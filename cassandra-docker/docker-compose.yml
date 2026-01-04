@@ -1,0 +1,82 @@
+version: "3.8"
+
+services:
+
+  cass1:
+    image: cassandra:4.1
+    container_name: cass_1
+    hostname: cass1
+    environment:
+      - CASSANDRA_CLUSTER_NAME=TestCluster
+      - CASSANDRA_NUM_TOKENS=256
+    volumes:
+      - cass1-data:/var/lib/cassandra
+    healthcheck:
+      test: ["CMD", "cqlsh", "-e", "describe keyspaces"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+  cass2:
+    image: cassandra:4.1
+    container_name: cass_2
+    hostname: cass2
+    depends_on:
+      cass1:
+        condition: service_healthy
+    environment:
+      - CASSANDRA_CLUSTER_NAME=TestCluster
+      - CASSANDRA_SEEDS=cass1
+      - CASSANDRA_NUM_TOKENS=256
+    volumes:
+      - cass2-data:/var/lib/cassandra
+    healthcheck:
+      test: ["CMD", "cqlsh", "-e", "describe keyspaces"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+  cass3:
+    image: cassandra:4.1
+    container_name: cass_3
+    hostname: cass3
+    depends_on:
+      cass1:
+        condition: service_healthy
+      cass2:
+        condition: service_healthy
+    environment:
+      - CASSANDRA_CLUSTER_NAME=TestCluster
+      - CASSANDRA_SEEDS=cass1
+      - CASSANDRA_BROADCAST_ADDRESS=cass3
+      - CASSANDRA_RPC_ADDRESS=0.0.0.0
+      - CASSANDRA_NUM_TOKENS=256
+    volumes:
+      - cass3-data:/var/lib/cassandra
+    healthcheck:
+      test: ["CMD", "cqlsh", "-e", "describe keyspaces"]
+      interval: 20s
+      timeout: 15s
+      retries: 20
+
+
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: cass_NGNIX
+    ports:
+      - "9042:9042"
+      - "8080:8080"
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      cass1:
+        condition: service_healthy
+      cass2:
+        condition: service_healthy
+      cass3:
+        condition: service_healthy
+
+volumes:
+  cass1-data:
+  cass2-data:
+  cass3-data:
