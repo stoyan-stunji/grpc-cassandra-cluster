@@ -132,7 +132,6 @@ services:
 
   service_a:
     build: ./service_a
-    container_name: service_a
     networks:
       - client-net
     ports:
@@ -157,10 +156,12 @@ services:
         reservations:
           cpus: '0.25'      
           memory: 256M  
+    environment:
+      - CASSANDRA_HOST=cass_nginx
+      - CASSANDRA_PORT=9042
 
   service_b:
     build: ./service_b
-    container_name: service_b
     networks:
         - client-net
     ports:
@@ -190,3 +191,6 @@ services:
         reservations:
           cpus: '0.25'
           memory: 256M
+    environment:
+      - CASSANDRA_HOST=cass_nginx
+      - CASSANDRA_PORT=9042

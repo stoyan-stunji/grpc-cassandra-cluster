@@ -26,7 +26,7 @@ def query_cassandra(index):
 
 def query_http(index):
     try:
-        r = requests.get(HTTP_URL, timeout=5)
+        r = requests.get(HTTP_URL, timeout=10)
         http_results.append((index, r.text.strip()))
     except Exception as e:
         http_results.append((index, f"ERROR: {e}"))
