@@ -1,4 +1,4 @@
-1. Bloated images -> switch to slim/alpine 
+1. Bloated images -> switch to slim/alpine !!
 - --no-install-recommends 
 - shallow git clone
 - remove apt cache
@@ -6,11 +6,11 @@
 
 2. Non-root user - write where needed without running as root
 
-4. Minimize the number of layers by combining multiple commands into a single layer
+3. Minimize the number of layers by combining multiple commands into a single layer
 
-5. Clean up unnecessary files: doc, stress, .md, etc.
+4. Clean up unnecessary files: doc, stress, .md, etc.
 
-6. .dockerignore 
+5. .dockerignore 
 - does not copy any files from the host
 - source is cloned inside the container
 - virt1 repo is very large so sending it as build context would waste time and disk
@@ -18,7 +18,7 @@
 - sends only the Dockerfile to Docker
 - keeps build context at a few KB
 
-7. Leverage layer caching
+6. Leverage layer caching
 - separate: Dependency resolution (cached) & Source compilation (changes more often)
 - not a simple Maven project -> Ant + Maven 
 - cloning from GitHub complicates caching
@@ -27,12 +27,12 @@
 - downloads all Maven dependencies and stores in Docker layer cache
 - reuse unless POM files change
 
-8. Environment leakage / Hardcoded configuration -> Environment variables
+7. Environment leakage / Hardcoded configuration -> Environment variables
 - injects env vars at runtime
 - keeps image immutable
 - avoids rebuilding for config changes
 
-9. Networking & Internal Networking
+8. Networking & Internal Networking
 - cluster-net -> only for internode communication
 - client-net -> for nginx, service_a, and external client access
 - internode ports (7000/7001/7199) are accessible internally
@@ -40,25 +40,58 @@
 - container names as seeds
 - set to container hostname (cass1, cass2, cass3)
 
-10. Improper logging -> Log to STDOUT/STDERR
+9. Improper logging -> Log to STDOUT/STDERR
 - flag -f: exec /opt/cassandra/bin/cassandra -f
 
-11. Health checks and Dependency ordering
+10. Health checks and Dependency ordering
 
-12. Multistage build -> builder & runtime
+11. Multistage build -> builder & runtime
 
-13. Named volumes used
+12. Named volumes used
 - named volumes ensure the data survives container recreation
 - no host dependency -> works on any machine
 
 -------------
 
-Nginx Service Discovery Failure -> Use Docker's Internal DNS: In the Nginx configuration, use the service name defined in the docker-compose.yml file as the upstream hostname (not localhost)
+Nginx Service Discovery Failure -> 
+Use Docker's Internal DNS: In the Nginx configuration, 
+use the service name defined in the docker-compose.yml file as the upstream hostname 
+(not localhost)
+?
+
 Nginx Configuration Management -> Externalize Nginx Configuration via Volume
-Proxy / Reverse-Proxy - NGINX
-Container Inspection & Logs - docker exec -it <container> /bin/bash, docker exec -it <container> bash, docker exec -it <container> ash, docker logs -f <container>, and docker inspect <container>
+/etc/nginx/nginx.conf is the main config
+
+Nginx loads stream + http
+
+Config is fully externalized
+
+:ro makes it immutable inside the container (best practice)
+✔ Config lives in Git
+✔ No image rebuilds needed
+✔ Editable on host
+✔ Volume-mounted
+✔ Production-correct (main config, not conf.d abuse)
+
+
+
+Proxy / Reverse-Proxy - NGINX !!! opravi ili ddz
+
+
+Container Inspection & Logs - 
+docker exec -it <container> /bin/bash, d
+ocker exec -it <container> bash, 
+docker exec -it <container> ash, 
+docker logs -f <container>, 
+and docker inspect <container>
+
+
 Nginx Reverse Proxy Routing - Trailing Slashes: there is a critical difference in Nginx between location /api/v1 and location /api/v1/. One forwards the path, the other strips it, leading to 404s on the backend.
-Simulating a Slowdown (Throttling) - Modify a Service A to include an artificial delay (e.g., time.sleep(3)) to simulate high latency/load. Check docker stats to see CPU spikes on the single Service A instance
+
+!!! da e more simulated pone da se vizda razlika mejdu / & /slow Simulating a Slowdown (Throttling) - Modify a Service A to include an artificial delay (e.g., time.sleep(3)) to simulate high latency/load. Check docker stats to see CPU spikes on the single Service A instance
+
 Manual Scaling and Dynamic Nginx Reload - Start a second instance of Service A manually using a new name and a linked network (e.g., docker run --net=app_default --name servera_2 servera_image). STEP 2: Nginx Update:  manually edit nginx.conf to add server servera_2:8000; to the upstream block. STEP 3: Zero-Downtime Reload: Use (docker exec -it nginx_container_id nginx -s) reload to apply the change without restarting the Nginx container. Prove the load is now distributed by hitting the API and seeing alternating responses (if service returns hostname/ID).
-Container Resource Limits - Add deploy: resources: limits: {cpus: '0.1', memory: '100M'} to one of the Python services in docker-compose.yml. Use docker stats while hitting the throttling endpoint.
+
+!!Container Resource Limits - Add deploy: resources: limits: {cpus: '0.1', memory: '100M'} to one of the Python services in docker-compose.yml. Use docker stats while hitting the throttling endpoint.
+
 Clean all non-running containers/images/volumes (docker system prune -a -f)

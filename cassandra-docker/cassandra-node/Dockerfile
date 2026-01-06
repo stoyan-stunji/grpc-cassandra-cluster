@@ -29,7 +29,6 @@ RUN rm -rf doc tools stress *.md *.txt
 
 RUN chown -R cassandra:cassandra /opt/cassandra
 
-# 12-Factor App
 ENV CASSANDRA_CLUSTER_NAME="Test Cluster" \
     CASSANDRA_LISTEN_ADDRESS=auto \
     CASSANDRA_RPC_ADDRESS=0.0.0.0 \
@@ -40,7 +39,7 @@ RUN mv conf/cassandra.yaml conf/cassandra.yaml.template
 
 COPY docker-entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
-
+ 
 EXPOSE 7000 7001 7199 9042
 
 VOLUME /var/lib/cassandra
