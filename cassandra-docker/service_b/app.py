@@ -13,7 +13,6 @@ def query_cassandra():
     try:
         cluster = Cluster([CASSANDRA_HOST], port=CASSANDRA_PORT)
         session = cluster.connect()
-        # Fetch number of keyspaces as a demo
         rows = session.execute("SELECT keyspace_name FROM system_schema.keyspaces")
         keyspaces = [r.keyspace_name for r in rows]
         cluster.shutdown()
@@ -25,7 +24,7 @@ def query_cassandra():
 def root():
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     ks_info = query_cassandra()
-    response = f"[{now}] Hello from service_b! (container: {HOSTNAME}), Cassandra Keyspaces: {ks_info}"
+    response = f"[{now}] SERVICE_B! Container: {HOSTNAME}), Cassandra Keyspaces: {ks_info}"
     print(response)
     return response
 
@@ -33,7 +32,7 @@ def root():
 def slow():
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     ks_info = query_cassandra()
-    response = f"[{now}] Slow response from service_b (container: {HOSTNAME}), Cassandra Keyspaces: {ks_info}"
+    response = f"[{now}] SERVICE_B (slow)! Container: {HOSTNAME}), Cassandra Keyspaces: {ks_info}"
     print(response)
     return response
 

@@ -18,7 +18,7 @@
 - sends only the Dockerfile to Docker
 - keeps build context at a few KB
 
-6. Leverage layer caching
+6. Leverage layer caching -> ОПРАВИ ГО!
 - separate: Dependency resolution (cached) & Source compilation (changes more often)
 - not a simple Maven project -> Ant + Maven 
 - cloning from GitHub complicates caching
@@ -27,7 +27,7 @@
 - downloads all Maven dependencies and stores in Docker layer cache
 - reuse unless POM files change
 
-7. Environment leakage / Hardcoded configuration -> Environment variables
+7. Environment leakage / Hardcoded configuration -> Environment variables > ОПРАВИ ГО!
 - injects env vars at runtime
 - keeps image immutable
 - avoids rebuilding for config changes

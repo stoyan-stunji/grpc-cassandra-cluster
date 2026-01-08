@@ -15,7 +15,7 @@ services:
 
   cass1:
     image: cassandra:4.1
-    container_name: cass_1
+    container_name: cass1
     hostname: cass1
     networks:
       - cluster-net
@@ -23,8 +23,8 @@ services:
     environment:
       - CASSANDRA_CLUSTER_NAME=TestCluster
       - CASSANDRA_NUM_TOKENS=256
-      - CASSANDRA_BROADCAST_ADDRESS=auto
-      - CASSANDRA_LISTEN_ADDRESS=auto
+      - CASSANDRA_BROADCAST_ADDRESS=cass1
+      - CASSANDRA_LISTEN_ADDRESS=cass1
       - CASSANDRA_RPC_ADDRESS=0.0.0.0
     volumes:
       - cass1-data:/var/lib/cassandra
@@ -40,7 +40,7 @@ services:
         max-file: "3"
   cass2:
     image: cassandra:4.1
-    container_name: cass_2
+    container_name: cass2
     hostname: cass2
     networks:
       - cluster-net
@@ -56,8 +56,8 @@ services:
     environment:
       - CASSANDRA_CLUSTER_NAME=TestCluster
       - CASSANDRA_NUM_TOKENS=256
-      - CASSANDRA_BROADCAST_ADDRESS=auto
-      - CASSANDRA_LISTEN_ADDRESS=auto
+      - CASSANDRA_BROADCAST_ADDRESS=cass2
+      - CASSANDRA_LISTEN_ADDRESS=cass2
       - CASSANDRA_RPC_ADDRESS=0.0.0.0
       - CASSANDRA_SEEDS=cass1
     volumes:
@@ -70,7 +70,7 @@ services:
 
   cass3:
     image: cassandra:4.1
-    container_name: cass_3
+    container_name: cass3
     hostname: cass3
     networks:
       - cluster-net
@@ -83,8 +83,8 @@ services:
     environment:
       - CASSANDRA_CLUSTER_NAME=TestCluster
       - CASSANDRA_NUM_TOKENS=256
-      - CASSANDRA_BROADCAST_ADDRESS=auto
-      - CASSANDRA_LISTEN_ADDRESS=auto
+      - CASSANDRA_BROADCAST_ADDRESS=cass3
+      - CASSANDRA_LISTEN_ADDRESS=cass3
       - CASSANDRA_RPC_ADDRESS=0.0.0.0
       - CASSANDRA_SEEDS=cass1,cass2
     volumes:

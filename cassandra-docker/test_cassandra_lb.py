@@ -5,7 +5,7 @@ import requests
 NUM_CONNECTIONS = 10
 CASSANDRA_HOST = '127.0.0.1'
 CASSANDRA_PORT = 9042
-HTTP_URL = 'http://localhost:8080/'
+HTTP_URL = 'http://localhost:8080/slow'
 
 cassandra_results = []
 http_results = []
@@ -46,13 +46,13 @@ for i in range(NUM_CONNECTIONS):
 for t in threads:
     t.join()
 
-print("\nCassandra Load Balancing Test Results (via NGINX):")
+print("\nCassandra Load Balancing Test Results (TCP):")
 for r in cassandra_results:
     if len(r) == 3:
-        print(f"Connection {r[0]}: handled by node with host_id={r[1]} ip={r[2]}")
+        print(f"Connection {r[0]}: Host_id={r[1]} IP={r[2]}")
     else:
         print(f"Connection {r[0]}: {r[1]}")
 
-print("\nHTTP Load Balancing Test Results (service_a & service_b via NGINX):")
+print("\nService Load Balancing Test Results (HTTP):")
 for r in http_results:
-    print(f"Request {r[0]}: handled by {r[1]}")
+    print(f"Request {r[0]}: By {r[1]}")
