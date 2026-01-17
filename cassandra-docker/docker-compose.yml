@@ -161,8 +161,8 @@ services:
           cpus: '0.25'      
           memory: 256M  
     environment:
-      - CASSANDRA_HOST=cass_nginx
-      - CASSANDRA_PORT=9042
+      CASSANDRA_HOST: ${CASSANDRA_HOST}
+      CASSANDRA_PORT: ${CASSANDRA_PORT}
 
   service_b:
     build: ./service_b
@@ -196,5 +196,5 @@ services:
           cpus: '0.25'
           memory: 256M
     environment:
-      - CASSANDRA_HOST=cass_nginx
-      - CASSANDRA_PORT=9042
+      CASSANDRA_HOST: ${CASSANDRA_HOST}
+      CASSANDRA_PORT: ${CASSANDRA_PORT}
