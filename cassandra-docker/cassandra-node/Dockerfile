@@ -8,13 +8,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         maven \
     && rm -rf /var/lib/apt/lists/*
 
-# Dependency layer
 ARG CASSANDRA_REF=cassandra-2.0
+
 RUN git clone --depth 1 --branch ${CASSANDRA_REF} \
     https://github.com/stoyan-stunji/virt1.git /tmp/src
 
 WORKDIR /tmp/src
-RUN mvn -DskipTests dependency:go-offline
+
+RUN mvn -B -DskipTests dependency:go-offline
 
 # Source layer
 WORKDIR /build
@@ -34,12 +35,6 @@ COPY --from=builder /build/build/apache-cassandra-*/ /opt/cassandra/
 RUN rm -rf doc tools stress *.md *.txt
 
 RUN chown -R cassandra:cassandra /opt/cassandra
-
-ENV CASSANDRA_CLUSTER_NAME="Test Cluster" \
-    CASSANDRA_LISTEN_ADDRESS=auto \
-    CASSANDRA_RPC_ADDRESS=0.0.0.0 \
-    CASSANDRA_SEEDS=127.0.0.1 \
-    CASSANDRA_HEAP_SIZE=1024M
 
 RUN mv conf/cassandra.yaml conf/cassandra.yaml.template
 

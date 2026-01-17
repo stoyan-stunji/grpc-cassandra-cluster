@@ -20,12 +20,14 @@ services:
     networks:
       - cluster-net
       - client-net
+    env_file: .env
     environment:
-      - CASSANDRA_CLUSTER_NAME=TestCluster
-      - CASSANDRA_NUM_TOKENS=256
-      - CASSANDRA_BROADCAST_ADDRESS=cass1
-      - CASSANDRA_LISTEN_ADDRESS=cass1
-      - CASSANDRA_RPC_ADDRESS=0.0.0.0
+      CASSANDRA_CLUSTER_NAME: ${CASSANDRA_CLUSTER_NAME}
+      CASSANDRA_NUM_TOKENS: ${CASSANDRA_NUM_TOKENS}
+      CASSANDRA_BROADCAST_ADDRESS: cass1
+      CASSANDRA_LISTEN_ADDRESS: cass1
+      CASSANDRA_RPC_ADDRESS: ${CASSANDRA_RPC_ADDRESS}
+      CASSANDRA_SEEDS: ${CASSANDRA_SEEDS_CASS1}
     volumes:
       - cass1-data:/var/lib/cassandra
     healthcheck:
@@ -53,13 +55,14 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+    env_file: .env
     environment:
-      - CASSANDRA_CLUSTER_NAME=TestCluster
-      - CASSANDRA_NUM_TOKENS=256
-      - CASSANDRA_BROADCAST_ADDRESS=cass2
-      - CASSANDRA_LISTEN_ADDRESS=cass2
-      - CASSANDRA_RPC_ADDRESS=0.0.0.0
-      - CASSANDRA_SEEDS=cass1
+      CASSANDRA_CLUSTER_NAME: ${CASSANDRA_CLUSTER_NAME}
+      CASSANDRA_NUM_TOKENS: ${CASSANDRA_NUM_TOKENS}
+      CASSANDRA_BROADCAST_ADDRESS: cass2
+      CASSANDRA_LISTEN_ADDRESS: cass2
+      CASSANDRA_RPC_ADDRESS: ${CASSANDRA_RPC_ADDRESS}
+      CASSANDRA_SEEDS: ${CASSANDRA_SEEDS_CASS2}
     volumes:
       - cass2-data:/var/lib/cassandra
     healthcheck:
@@ -80,13 +83,14 @@ services:
         condition: service_healthy
       cass2:
         condition: service_healthy
+    env_file: .env
     environment:
-      - CASSANDRA_CLUSTER_NAME=TestCluster
-      - CASSANDRA_NUM_TOKENS=256
-      - CASSANDRA_BROADCAST_ADDRESS=cass3
-      - CASSANDRA_LISTEN_ADDRESS=cass3
-      - CASSANDRA_RPC_ADDRESS=0.0.0.0
-      - CASSANDRA_SEEDS=cass1,cass2
+      CASSANDRA_CLUSTER_NAME: ${CASSANDRA_CLUSTER_NAME}
+      CASSANDRA_NUM_TOKENS: ${CASSANDRA_NUM_TOKENS}
+      CASSANDRA_BROADCAST_ADDRESS: cass3
+      CASSANDRA_LISTEN_ADDRESS: cass3
+      CASSANDRA_RPC_ADDRESS: ${CASSANDRA_RPC_ADDRESS}
+      CASSANDRA_SEEDS: ${CASSANDRA_SEEDS_CASS3}
     volumes:
       - cass3-data:/var/lib/cassandra
     healthcheck:
