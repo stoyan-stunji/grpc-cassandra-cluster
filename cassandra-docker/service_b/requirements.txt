@@ -1,3 +1,5 @@
 flask
+grpcio
+grpcio-tools
 cassandra-driver
 requests

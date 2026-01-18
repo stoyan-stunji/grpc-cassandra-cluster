@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+package cluster;
+
+service ClusterService {
+  rpc GetClusterInfo (ClusterRequest) returns (ClusterResponse);
+}
+
+message ClusterRequest {}
+
+message ClusterResponse {
+  string cluster_name = 1;
+  int32 keyspace_count = 2;
+}

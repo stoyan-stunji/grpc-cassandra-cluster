@@ -198,3 +198,21 @@ services:
     environment:
       CASSANDRA_HOST: ${CASSANDRA_HOST}
       CASSANDRA_PORT: ${CASSANDRA_PORT}
+  
+  grpc_api:
+    build: ./grpc_service
+    container_name: grpc_api
+    networks:
+      - client-net
+    depends_on:
+      cass1:
+        condition: service_healthy
+      cass2:
+        condition: service_healthy
+      cass3:
+        condition: service_healthy
+    environment:
+      CASSANDRA_HOST: cass_nginx
+      CASSANDRA_PORT: 9042
+    ports:
+    - "50051:50051"
