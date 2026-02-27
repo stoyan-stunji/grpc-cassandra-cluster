@@ -84,7 +84,7 @@ Client → NGINX → gRPC API → Cluster
 ```
 
 ### Optimization
-
+#### No Bloated Images
 No bloated images were used in this setup. Such images typically include packages that the application does not need, along 
 with debug tools, full build environments (compilers, SDKs), unnecessary dependencies, and temporary files. All of this significantly 
 increases the image size, leading to slower downloads and startup times, as well as higher disk space usage. Larger images also 
@@ -93,48 +93,52 @@ the increased number of dependencies and the added complexity when debugging. Th
 such as slim or alpine variants – for example, python:3.11-slim, openjdk:11-jdk-slim and etc. These images contain only the 
 essential components required to run the application, resulting in smaller size, improved security, and easier maintenance.
 
+#### Non-root
 Each container runs as a non-root user, granting permissions only where necessary. Running containers as root creates a 
 security vulnerability: if an attacker gains access, they obtain root privileges inside the container. This can lead to 
 unauthorized access to host files, container escapes, and the ability to alter other containers.
 
+#### Minimized Number Of Layers
 The number of layers has been minimized by combining multiple commands into a single layer. Each RUN, COPY, ADD and etc. 
 creates a new layer, which is cached and stacked on top of previous layers. Even if a file is deleted in a later layer, 
 it remains in the cache of the earlier layer. By combining commands into fewer layers, Docker can cache logically connected 
 steps more efficiently, reducing unnecessary cache invalidation and keeping the image smaller. 
 
+#### Clean-up The Unnecessary
 All unnecessary files – such as .doc, .md, .stress, and etc., have been removed, since they are not needed at runtime. 
 Keeping them would waste space and increase the time required to push or pull the image. The production image is separate 
 from the development environment and should include only what is essential for runtime execution. In addition, a .dockerignore 
 files have been created to specify which files and directories should be excluded from the build context sent to the Docker 
 daemon. This reduces unnecessary data transfer, speeds up the build process, and keeps the image lean.
 
+#### Leveraged Layer Caching
 The project leverages layer-level caching for improved build efficiency. Following the principle of separation of concerns 
 enhances cache effectiveness: dependencies, which change infrequently, are handled in a separate layer from source compilation, 
 which changes frequently. When using git clone, this approach prevents unnecessary cache invalidation – dependencies are cached 
 in a layer before the source code, and only the latest commit is cloned, minimizing cache misses and speeding up builds.
 
+#### Environmental Variables
 To prevent environment leakage and avoid hardcoded configurations, environment variables are used. Hardcoding configuration 
 embeds it in the image, leaving sensitive data in the layers when the image is rebuilt i.e. security risk. The solution is to 
 inject configuration at runtime rather than at build time, keeping sensitive information out of the image and improving security.
 
+#### The Advantge Of Dockes's Internal DNS
 Docker IPs are dynamic, meaning a container’s IP can change when it is restarted. By using container names as seeds, Docker’s 
 internal DNS automatically resolves the names, ensuring consistent connectivity. This also prevents mismatches between the 
 listen address and broadcast address, which can otherwise cause issues in cluster communication.
 
+#### (Im)proper Logging
 Writing logs to files inside a container is considered bad practice because containers have internal log rotation, and logs 
 are lost when the container is restarted. To maintain stateless containers, logs should be sent to STDOUT or STDERR, which 
 are captured and managed by the platform, ensuring persistence and easier monitoring.
 
+#### Dependency Ordering + Health Checks
 By default, Docker only knows if the process is working and doesn’t know if its actually ready. This can lead to race 
 conditions, crash loops and instability when restarting. By using depends_on and health checks we can guarantee 
 self-healing – this way when the dependency is lost and becomes unhealty, the orchestrator can restart the container 
 or turn off the traffic to it. 
 
-By default, Docker only monitors whether a process is running, not whether it is actually ready. This can lead to race
-conditions, crash loops, and instability during restarts. By using “depends_on” combined with health checks, we ensure 
-self-healing: if a dependency becomes unhealthy, the orchestrator can restart the container or stop directing traffic to 
-it, maintaining system stability and reliability.
-
+#### Multistage Builds
 Multistage Builds separate the build and runtime environments. By definition, a multistage build uses more than one FROM 
 instruction: a build stage for compiling, building, and installing dependencies, and a runtime stage containing only what 
 is necessary to run the application. Using multistage builds provides several benefits: smaller image sizes, faster push 
