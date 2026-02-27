@@ -151,6 +151,8 @@ setup ensures high availability, maintainability, and performance, providing a p
 and microservice architecture principles.
 
 ### Literature
-- 12 Factor APP
-- APACHE cassandra
-- 
+- [The Twelve-Factor App](https://www.12factor.net/)
+- [Apache Cassandra Documentation](https://cassandra.apache.org/_/index.html)
+- [Microservice Demo](https://github.com/Joker666/microservice-demo)
+- [The Popek and Goldberg Theorem (1974)](https://www.cs.cornell.edu/courses/cs6411/2018sp/papers/popek-goldberg.pdf)
+- [Virtual Machines - James E. Smith & Ravi Nair](http://ndl.ethernet.edu.et/bitstream/123456789/42492/1/14.pdf)
